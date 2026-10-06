@@ -66,9 +66,9 @@ git push -u origin feat/gemini-tts
 
 此 fork 的 `.github/workflows/gemini-apk.yml` 在 `main` 更新时自动构建，也可以在 GitHub Actions 的 **Build Gemini TTS APK** 页面手动运行。
 
-构建产物 `readest-gemini-tts-arm64` 包含 `Readest-Gemini-TTS-arm64-debug.apk` 和 `SHA256SUMS`，保留 14 天。APK 支持 ARM64 Android 8.0 及以上设备，使用 Android 测试签名，不需要把 Gemini Key 或发行签名密钥提交到仓库。
+构建产物 `readest-gemini-tts-arm64` 包含 `Readest-Gemini-TTS-arm64.apk` 和 `SHA256SUMS`，保留 14 天。APK 支持 ARM64 Android 8.0 及以上设备，采用 Release 优化构建并移除调试符号，成功后自动发布到 GitHub 预发行页面。使用仓库内固定的公开测试签名 `.github/android-test-signing.p12`（口令 `android`），此密钥仅用于测试，不能用于生产发行；不包含 Gemini Key 或官方发行签名密钥。
 
-测试版和官方版的签名不同，不能直接覆盖官方安装包。安装前请先备份书籍、批注和设置；卸载已有版本会删除该应用的本地数据。此构建不会发布或覆盖官方发行版。
+测试版与官方版及之前的临时签名 Debug 包签名不同，无法覆盖这些安装包。安装前请先备份书籍、批注和设置；卸载已有版本会删除该应用的本地数据。此构建不会发布或覆盖官方发行版。
 
 ## 本次修正
 

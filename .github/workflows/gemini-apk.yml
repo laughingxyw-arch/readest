@@ -55,7 +55,7 @@ jobs:
           targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
-          key: gemini-apk-arm64
+          key: gemini-apk-arm64-release
 
       - name: Install frontend dependencies
         run: |
@@ -78,21 +78,33 @@ jobs:
           pnpm tauri icon ../../data/icons/readest-book.png
           # Restore only committed Android customizations, retaining generated scaffolding.
           git restore --source=HEAD --worktree -- src-tauri/gen/android
-          pnpm tauri android build --debug --target aarch64
+          # Public test-only key: never use this identity for production signing.
+          android_dir="$PWD/src-tauri/gen/android"
+          cp ../../.github/android-test-signing.p12 "$android_dir/test-signing.p12"
+          printf 'keyAlias=androiddebugkey\npassword=android\nstoreFile=%s/test-signing.p12\n' "$android_dir" > "$android_dir/keystore.properties"
+          pnpm tauri android build --target aarch64
           apk_dir=src-tauri/gen/android/app/build/outputs/apk
-          apk=$(find "$apk_dir" -type f -name '*-debug.apk' -print -quit)
+          apk=$(find "$apk_dir" -type f -name '*-release.apk' -print -quit)
           test -n "$apk"
           mkdir -p dist
-          cp "$apk" dist/Readest-Gemini-TTS-arm64-debug.apk
+          cp "$apk" dist/Readest-Gemini-TTS-arm64.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs dist/Readest-Gemini-TTS-arm64.apk
+          python - <<'PYVERIFY'
+          import zipfile
+          with zipfile.ZipFile('dist/Readest-Gemini-TTS-arm64.apk') as apk:
+              lib = apk.getinfo('lib/arm64-v8a/libreadestlib.so')
+              print(f'Rust library: {lib.file_size / 1024**2:.1f} MiB')
+              assert lib.file_size < 150 * 1024**2, 'Rust library still contains excessive debug data'
+          PYVERIFY
           cd dist
-          sha256sum Readest-Gemini-TTS-arm64-debug.apk > SHA256SUMS
+          sha256sum Readest-Gemini-TTS-arm64.apk > SHA256SUMS
 
       - name: Upload APK
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: readest-gemini-tts-arm64
           path: |
-            apps/readest-app/dist/Readest-Gemini-TTS-arm64-debug.apk
+            apps/readest-app/dist/Readest-Gemini-TTS-arm64.apk
             apps/readest-app/dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
