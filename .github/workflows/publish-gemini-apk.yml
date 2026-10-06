@@ -1,0 +1,66 @@
+name: Publish Gemini TTS APK download
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Build Gemini TTS APK run ID
+        required: true
+        default: '37452065377'
+        type: string
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-gemini-apk.yml']
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-gemini-apk
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      APK_RUN_ID: ${{ inputs.run_id || '37452065377' }}
+    steps:
+      - name: Verify source build and download APK
+        run: |
+          set -euo pipefail
+          [[ "$APK_RUN_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$APK_RUN_ID" > source-run.json
+          python - <<'PY'
+          import json, os
+          run = json.load(open('source-run.json'))
+          assert run['repository']['full_name'] == os.environ['GITHUB_REPOSITORY']
+          assert run['name'] == 'Build Gemini TTS APK'
+          assert run['status'] == 'completed' and run['conclusion'] == 'success'
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('APK_COMMIT=' + run['head_sha'] + '\n')
+          PY
+          gh run download "$APK_RUN_ID" --repo "$GITHUB_REPOSITORY" --name readest-gemini-tts-arm64 --dir apk
+          cd apk
+          sha256sum --check SHA256SUMS
+          test -s Readest-Gemini-TTS-arm64-debug.apk
+
+      - name: Publish verified APK as a prerelease
+        run: |
+          set -euo pipefail
+          tag="gemini-tts-${APK_COMMIT:0:7}"
+          cat > release-notes.md <<'NOTES'
+          Gemini TTS ARM64 test APK for Android 8.0 or later.
+
+          安装后在“设置 → 朗读 → Gemini TTS”输入自己的 API Key。
+          测试签名与官方版本不同，不能直接覆盖安装；卸载旧版前请备份书籍、批注和设置。
+          小米 15 的 ARM64 架构满足要求，但尚未进行小米 15 真机测试。
+          NOTES
+          printf '\nSource commit: %s\nBuild run: %s\n' "$APK_COMMIT" "$APK_RUN_ID" >> release-notes.md
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$APK_COMMIT" --draft --prerelease --latest=false --title 'Readest Gemini TTS — ARM64 test APK' --notes-file release-notes.md
+          fi
+          gh release upload "$tag" apk/Readest-Gemini-TTS-arm64-debug.apk apk/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false --notes-file release-notes.md
