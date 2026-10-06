@@ -33,6 +33,8 @@ export interface TTSCapabilities {
   // clock. The controller must not also sleep for it: doing both plays the gap
   // twice and puts synthesis latency on top of it instead of inside it (#5750).
   scheduledGaps?: boolean;
+  // Allows the existing sentence-pack downloader for this engine.
+  bookDownload?: boolean;
 }
 
 export interface TTSClient {

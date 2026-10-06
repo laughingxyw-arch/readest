@@ -1,0 +1,98 @@
+name: Build Gemini TTS APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gemini-apk.yml'
+      - 'apps/readest-app/**'
+      - 'packages/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'patches/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gemini-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android toolchain
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          key: gemini-apk-arm64
+
+      - name: Install frontend dependencies
+        run: |
+          pnpm install --frozen-lockfile --prefer-offline
+          pnpm --filter @readest/readest-app setup-vendors
+
+      - name: Check Gemini TTS
+        working-directory: apps/readest-app
+        run: |
+          pnpm lint
+          pnpm test --run --maxWorkers=2 src/__tests__/services/gemini-tts.test.ts src/__tests__/services/gemini-playback.test.ts src/__tests__/components/settings/GeminiTTSSettings.test.tsx src/__tests__/services/tts-controller.test.ts
+
+      - name: Build installable ARM64 test APK
+        working-directory: apps/readest-app
+        run: |
+          set -euo pipefail
+          export NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          rm -rf src-tauri/gen/android
+          pnpm tauri android init --ci --skip-targets-install
+          pnpm tauri icon ../../data/icons/readest-book.png
+          # Restore only committed Android customizations, retaining generated scaffolding.
+          git restore --source=HEAD --worktree -- src-tauri/gen/android
+          pnpm tauri android build --debug --target aarch64
+          apk_dir=src-tauri/gen/android/app/build/outputs/apk
+          apk=$(find "$apk_dir" -type f -name '*-debug.apk' -print -quit)
+          test -n "$apk"
+          mkdir -p dist
+          cp "$apk" dist/Readest-Gemini-TTS-arm64-debug.apk
+          cd dist
+          sha256sum Readest-Gemini-TTS-arm64-debug.apk > SHA256SUMS
+
+      - name: Upload APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: readest-gemini-tts-arm64
+          path: |
+            apps/readest-app/dist/Readest-Gemini-TTS-arm64-debug.apk
+            apps/readest-app/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

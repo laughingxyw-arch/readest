@@ -186,6 +186,16 @@ describe('TTSController', () => {
   // EventTarget rejects it as "parameter 1 is not of type 'Event'" (#5149).
   const speakingControllers: TTSController[] = [];
 
+  test('does not speculatively generate Gemini paragraphs before section batching', async () => {
+    await controller.initViewTTS(0);
+    controller.ttsClient = controller.ttsGeminiClient;
+    const speak = vi
+      .spyOn(controller.ttsGeminiClient, 'speak')
+      .mockImplementation(async function* () {});
+    await controller.preloadNextSSML();
+    expect(speak).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockView = createMockView();

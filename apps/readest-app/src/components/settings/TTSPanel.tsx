@@ -15,6 +15,7 @@ import {
 import { getTTSCacheConfig, setTTSCacheConfig } from '@/services/tts/providers/bookCacheStore';
 import { BoxedList, SettingsRow, SettingsSelect, SettingsSwitchRow } from './primitives';
 import TTSHighlightStyleEditor, { TTSHighlightStyle } from './theme/TTSHighlightStyleEditor';
+import GeminiTTSSettings from './GeminiTTSSettings';
 
 const TTSPanel: React.FC<SettingsPanelPanelProp> = ({ bookKey, onRegisterReset }) => {
   const _ = useTranslation();
@@ -146,6 +147,7 @@ const TTSPanel: React.FC<SettingsPanelPanelProp> = ({ bookKey, onRegisterReset }
 
   return (
     <div className='my-4 w-full space-y-6'>
+      <GeminiTTSSettings />
       <TTSHighlightStyleEditor
         granularity={ttsHighlightGranularity}
         style={ttsHighlightStyle}

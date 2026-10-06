@@ -19,6 +19,8 @@ import { expandRangeOverRuby } from '@/utils/ruby';
 import { WebSpeechClient } from './WebSpeechClient';
 import { NativeTTSClient } from './NativeTTSClient';
 import { EdgeTTSClient } from './EdgeTTSClient';
+import { GeminiTTSClient } from './GeminiTTSClient';
+import type { GeminiSentence } from './gemini';
 import { SectionTimeline, TimelineSentence } from './SectionTimeline';
 import { hydrateProvisionalDurations } from './ttsDuration';
 import { DownloadableSentence, SectionEnumerator, TTSDownloader } from './TTSDownloader';
@@ -215,6 +217,8 @@ export class TTSController extends EventTarget {
   ttsClient: TTSClient;
   ttsWebClient: TTSClient;
   ttsEdgeClient: EdgeTTSClient;
+  ttsGeminiClient: GeminiTTSClient;
+  #geminiPreparedSection = '';
   ttsNativeClient: TTSClient | null = null;
   ttsMediaOverlayClient: MediaOverlayClient;
   ttsWebVoices: TTSVoice[] = [];
@@ -234,6 +238,7 @@ export class TTSController extends EventTarget {
     super();
     this.ttsWebClient = new WebSpeechClient(this);
     this.ttsEdgeClient = new EdgeTTSClient(this, appService);
+    this.ttsGeminiClient = new GeminiTTSClient(this);
     // Native TTS is backed by Android TextToSpeech and iOS AVSpeechSynthesizer.
     // TODO: implement native TTS client for desktop platforms.
     if (appService?.isAndroidApp || appService?.isIOSApp) {
@@ -418,6 +423,9 @@ export class TTSController extends EventTarget {
 
   async init() {
     const availableClients = [];
+    if (await this.ttsGeminiClient.init()) {
+      availableClients.push(this.ttsGeminiClient);
+    }
     if (await this.ttsEdgeClient.init()) {
       availableClients.push(this.ttsEdgeClient);
     }
@@ -925,10 +933,13 @@ export class TTSController extends EventTarget {
   // and labels sentences identically to ensureTimeline so packs written here
   // and by playback share one manifest.
   canDownload(): boolean {
-    return this.ttsEdgeClient.canDownload();
+    return (
+      this.ttsClient.getCapabilities().bookDownload !== false && this.ttsEdgeClient.canDownload()
+    );
   }
 
   getTTSDownloader(): TTSDownloader | null {
+    if (this.ttsClient.getCapabilities().bookDownload === false) return null;
     const edge = this.ttsEdgeClient;
     if (!edge.canDownload()) return null;
     const enumerator: SectionEnumerator = {
@@ -1464,6 +1475,9 @@ export class TTSController extends EventTarget {
   }
 
   async preloadNextSSML(count: number = 4) {
+    // Gemini prepares the whole chapter in #speak. Paragraph lookahead can
+    // race that preparation and spend quota on short fallback requests.
+    if (this.ttsClient === this.ttsGeminiClient) return;
     const tts = this.#getTts();
     if (!tts) return;
 
@@ -1515,6 +1529,40 @@ export class TTSController extends EventTarget {
     }
 
     return ssml;
+  }
+
+  async #prepareGeminiSection(signal: AbortSignal): Promise<void> {
+    if (this.ttsClient !== this.ttsGeminiClient) return;
+    const id = `${this.bookKey}:${this.#ttsSectionIndex}:${this.ttsLang}:${this.ttsTargetLang}:${this.#skipInlineAnnotations}`;
+    if (this.#geminiPreparedSection === id) return;
+    const section = this.view.book.sections?.[this.#ttsSectionIndex];
+    if (!section?.createDocument)
+      throw new Error('This book section cannot be prepared for Gemini TTS.');
+    const doc = await this.#createSectionDoc(section);
+    const [{ TTS }, { textWalker }] = await Promise.all([
+      import('foliate-js/tts.js'),
+      import('foliate-js/text-walker.js'),
+    ]);
+    // A fresh source enumerates full paragraphs without moving the live
+    // reading cursor. Preprocessing matches live speech, including translation.
+    const source = new TTS(doc, textWalker, createTTSNodeFilter(), () => {}, 'sentence');
+    const sentences: GeminiSentence[] = [];
+    let raw = source.start();
+    while (raw) {
+      if (signal.aborted) return;
+      const processed = await this.#preprocessSSML(raw);
+      if (processed)
+        sentences.push(
+          ...parseSSMLMarks(processed, this.ttsLang || 'en').marks.map((mark) => ({
+            text: mark.text,
+            lang: mark.language,
+          })),
+        );
+      raw = source.next();
+    }
+    if (signal.aborted) return;
+    this.ttsGeminiClient.prepareSection(id, sentences);
+    this.#geminiPreparedSection = id;
   }
 
   async #speak(ssml: string | undefined | Promise<string>, oneTime = false) {
@@ -1577,6 +1625,7 @@ export class TTSController extends EventTarget {
           } else {
             this.dispatchSpeakMark(marks[0]);
           }
+          await this.#prepareGeminiSection(signal);
           await this.preloadSSML(ssml, signal);
         }
         // Only the native client surfaces an offline engine failure as a
@@ -1964,6 +2013,7 @@ export class TTSController extends EventTarget {
   }
 
   async setPrimaryLang(lang: string) {
+    if (this.ttsGeminiClient.initialized) this.ttsGeminiClient.setPrimaryLang(lang);
     if (this.ttsEdgeClient.initialized) this.ttsEdgeClient.setPrimaryLang(lang);
     if (this.ttsWebClient.initialized) this.ttsWebClient.setPrimaryLang(lang);
     if (this.ttsNativeClient?.initialized) this.ttsNativeClient?.setPrimaryLang(lang);
@@ -1980,6 +2030,7 @@ export class TTSController extends EventTarget {
   }
 
   async getVoices(lang: string) {
+    const ttsGeminiVoices = await this.ttsGeminiClient.getVoices(lang);
     const ttsWebVoices = await this.ttsWebClient.getVoices(lang);
     const ttsEdgeVoices = await this.ttsEdgeClient.getVoices(lang);
     const ttsNativeVoices = (await this.ttsNativeClient?.getVoices(lang)) ?? [];
@@ -1991,6 +2042,7 @@ export class TTSController extends EventTarget {
 
     const voicesGroups = [
       ...narrationVoices,
+      ...ttsGeminiVoices,
       ...ttsNativeVoices,
       ...ttsEdgeVoices,
       ...ttsWebVoices,
@@ -2027,7 +2079,13 @@ export class TTSController extends EventTarget {
     const useNativeTTS = !!this.ttsNativeVoices.find(
       (voice) => (voiceId === '' || voice.id === voiceId) && !voice.disabled,
     );
-    if (useEdgeTTS) {
+    if (voiceId.startsWith('gemini:')) {
+      if (!this.ttsGeminiClient.initialized && !(await this.ttsGeminiClient.init())) {
+        throw new Error('Enable Gemini TTS and save your API key in Settings → TTS first.');
+      }
+      this.ttsClient = this.ttsGeminiClient;
+      await this.ttsClient.setRate(this.ttsRate);
+    } else if (useEdgeTTS) {
       this.ttsClient = this.ttsEdgeClient;
       await this.ttsClient.setRate(this.ttsRate);
     } else if (useNativeTTS) {
@@ -2370,6 +2428,7 @@ export class TTSController extends EventTarget {
     if (this.ttsEdgeClient.initialized) {
       await this.ttsEdgeClient.shutdown();
     }
+    await this.ttsGeminiClient.shutdown();
     if (this.ttsNativeClient?.initialized) {
       await this.ttsNativeClient.shutdown();
     }
