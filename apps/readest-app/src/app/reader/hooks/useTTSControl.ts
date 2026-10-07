@@ -99,11 +99,13 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   // voice (a book's own narrator is a voice), so they are state rather than a
   // render-time probe: switching voices has to redraw the player.
   const [supportsLyrics, setSupportsLyrics] = useState(false);
+  const [supportsSentenceSteps, setSupportsSentenceSteps] = useState(true);
   const [loopState, setLoopState] = useState<TTSLoopState>('off');
   const syncClientCapabilities = useCallback(() => {
     const controller = ttsControllerRef.current;
     setAudioTransport(controller?.usesAudioTransport() ?? false);
     setSupportsLyrics(controller?.supportsLyrics() ?? false);
+    setSupportsSentenceSteps(!controller?.ttsClient.getCapabilities().segmentBoundaries);
   }, []);
 
   // Broadcast playback transitions on the app-wide bus so consumers that
@@ -1381,6 +1383,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     handlePlayFromLyric,
     audioTransport,
     supportsLyrics,
+    supportsSentenceSteps,
     buffering,
     refreshTtsLang,
     getController,

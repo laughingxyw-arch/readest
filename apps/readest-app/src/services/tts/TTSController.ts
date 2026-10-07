@@ -31,7 +31,7 @@ import { SectionTimeline, TimelineSentence } from './SectionTimeline';
 import { hydrateProvisionalDurations } from './ttsDuration';
 import { DownloadableSentence, SectionEnumerator, TTSDownloader } from './TTSDownloader';
 import { TTSUtils } from './TTSUtils';
-import { TTSClient } from './TTSClient';
+import { TTSClient, type TTSPlaybackSegment } from './TTSClient';
 import { startAudioKeepAlive, stopAudioKeepAlive } from './WebAudioPlayer';
 import { isValidLang } from '@/utils/lang';
 import { normalizeLyricText } from '@/utils/ttsLyrics';
@@ -225,6 +225,7 @@ export class TTSController extends EventTarget {
   ttsEdgeClient: EdgeTTSClient;
   ttsMiMoClient: MiMoTTSClient;
   #mimoPreparedSection = '';
+  #speechSegment: TTSPlaybackSegment | null = null;
   ttsNativeClient: TTSClient | null = null;
   ttsMediaOverlayClient: MediaOverlayClient;
   ttsWebVoices: TTSVoice[] = [];
@@ -626,6 +627,11 @@ export class TTSController extends EventTarget {
   #getHighlighter() {
     return (range: Range) => {
       if (this.ttsClient.getCapabilities().textHighlight === false) return;
+      if (this.ttsClient.getCapabilities().segmentBoundaries) {
+        const segmentRange = this.#resolveSpeechSegment(this.#ttsDoc);
+        if (!segmentRange) return;
+        range = segmentRange;
+      }
       // Suppress the sentence highlight that foliate's setMark draws when the
       // active client highlights word-by-word. The flag is only set around the
       // synchronous setMark call, so word draws (dispatchSpeakWord) and paused
@@ -1632,6 +1638,7 @@ export class TTSController extends EventTarget {
                 text: mark.text,
                 lang: mark.language,
                 cfi: locations.get(`${block}:${mark.name}`),
+                paragraph: `${sectionId(index)}:${block}`,
               })),
             );
           raw = source.next();
@@ -1724,18 +1731,20 @@ export class TTSController extends EventTarget {
         // Only the native client surfaces an offline engine failure as a
         // terminal 'error' code (Edge/Web throw, which the catch below handles).
         const canSkipOnError = this.ttsClient === this.ttsNativeClient;
-        const iter = await this.ttsClient.speak(
-          stepped ? truncateSSMLAfterMark(ssml, marks[0]!.name) : ssml,
-          signal,
-        );
+        const spokenSSML = stepped ? truncateSSMLAfterMark(ssml, marks[0]!.name) : ssml;
+        const iter =
+          oneTime && this.ttsClient.getCapabilities().segmentBoundaries
+            ? this.ttsClient.speak(spokenSSML, signal, false, true)
+            : this.ttsClient.speak(spokenSSML, signal);
         let lastCode;
+        let playbackSegment: TTSPlaybackSegment | undefined;
         // A step mode switched on mid-paragraph still has to stop where the
         // sentence now sounding ends: on its 'end' (engines that speak mark by
         // mark), or else at the next sentence's boundary.
         let sentenceMark: string | undefined;
         let sentenceRange: Range | undefined;
         let stepAfter: { range?: Range; advance: boolean } | null = null;
-        for await (const { code, mark } of iter) {
+        for await (const { code, mark, segment } of iter) {
           // Anything the iterator yields means the client is done waiting:
           // 'boundary' is the first audible chunk, 'end'/'error' resolve the
           // wait the other way.
@@ -1745,7 +1754,12 @@ export class TTSController extends EventTarget {
             return;
           }
           lastCode = code;
+          if (!oneTime && segment && code === 'boundary') {
+            playbackSegment = segment;
+            this.dispatchSpeakSegment(segment);
+          }
           if (oneTime || this.state !== 'playing') continue;
+          if (playbackSegment) continue;
           if (code === 'end') {
             const range = this.#getTts()?.getLastRange();
             if (this.#stopsAfter(range)) {
@@ -1762,7 +1776,20 @@ export class TTSController extends EventTarget {
           }
         }
 
-        if (stepAfter) {
+        if (playbackSegment && lastCode === 'end' && this.state === 'playing' && !oneTime) {
+          this.#consecutiveSpeakErrors = 0;
+          if (playbackSegment.nextCFI) {
+            const range = this.view.resolveCFI(playbackSegment.nextCFI).anchor(this.#ttsDoc!);
+            if (!range) throw new Error('Could not locate the next speech segment.');
+            resolve();
+            this.#speak(this.#getTts()?.from(range));
+          } else {
+            resolve();
+            await this.stop(true);
+            if (this.stopAtChapterEnd) await this.#stopAtChapterBoundary();
+            else await this.#handleNavigationWithoutSSML(() => this.#initTTSForNextSection(), true);
+          }
+        } else if (stepAfter) {
           this.#consecutiveSpeakErrors = 0;
           resolve();
           await this.#afterSentence(stepAfter.range, stepAfter.advance, signal);
@@ -1832,7 +1859,11 @@ export class TTSController extends EventTarget {
   }
 
   #stepsBySentence(): boolean {
-    return (this.pauseAfterSentence || this.#loopB !== null) && !this.usesAudioTransport();
+    return (
+      (this.pauseAfterSentence || this.#loopB !== null) &&
+      !this.usesAudioTransport() &&
+      !this.ttsClient.getCapabilities().segmentBoundaries
+    );
   }
 
   // Whether playback must not simply read on past this sentence.
@@ -2014,6 +2045,10 @@ export class TTSController extends EventTarget {
   }
 
   async stop(handover = false) {
+    if (this.#speechSegment) {
+      this.#speechSegment = null;
+      this.#clearAllHighlights();
+    }
     this.#awaitingAudio = false;
     if (this.#currentSpeakAbortController) {
       this.#currentSpeakAbortController.abort();
@@ -2261,6 +2296,30 @@ export class TTSController extends EventTarget {
       return tts.getPlaybackRange(this.ttsClient.getChunkProgress?.());
     }
     return tts.getLastRange();
+  }
+
+  #resolveSpeechSegment(doc: Document | null): Range | null {
+    const segment = this.#speechSegment;
+    if (!doc || !segment?.startCFI || !segment.endCFI) return null;
+    const start = this.view.resolveCFI(segment.startCFI).anchor(doc);
+    const end = this.view.resolveCFI(segment.endCFI).anchor(doc);
+    if (!start || !end) return null;
+    const range = start.cloneRange();
+    range.setEnd(end.endContainer, end.endOffset);
+    return range;
+  }
+
+  dispatchSpeakSegment(segment: TTSPlaybackSegment): void {
+    this.#speechSegment = segment;
+    this.#resetSpeakWords();
+    const range = this.#resolveSpeechSegment(this.#ttsDoc);
+    if (!range) return;
+    this.#getHighlighter()(range);
+    const cfi = this.view.getCFI(this.#ttsSectionIndex, range);
+    this.dispatchEvent(
+      new CustomEvent('tts-highlight-mark', { detail: { cfi, sentenceCfi: cfi } }),
+    );
+    this.#dispatchPosition(cfi, 'sentence');
   }
 
   dispatchSpeakMark(mark?: TTSMark): { sectionIndex: number; sentenceIndex: number } | null {

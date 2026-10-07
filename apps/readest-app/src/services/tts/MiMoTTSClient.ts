@@ -31,9 +31,8 @@ interface PreparedBatch extends MiMoBatch {
   lookaheadStarted?: boolean;
 }
 
-// A long recording is kept intact. Sentence locations are proportional
-// estimates used to advance foliate's cursor, never advertised as real
-// text alignment. Pauses/voice changes do not resynthesize cached recordings.
+// Each recording is one highlighted text segment. Only its real end advances
+// the reader; no proportional sentence timestamps are used during playback.
 export class MiMoTTSClient implements TTSClient {
   name = 'mimo-tts';
   initialized = false;
@@ -84,7 +83,7 @@ export class MiMoTTSClient implements TTSClient {
   }
   prepareSection(id: string, sentences: MiMoSentence[], following: PreparedSection[] = []): void {
     const config = this.#config();
-    const identity = `${id}|${config.model}|${config.voice}|${config.batchMinutes}`;
+    const identity = `segments-v1|${id}|${config.model}|${config.voice}|${config.batchMinutes}`;
     if (this.#section === identity) return;
     this.#generation++;
     this.#lookaheadAbort?.abort();
@@ -93,7 +92,9 @@ export class MiMoTTSClient implements TTSClient {
     this.#section = identity;
     this.#sectionId = id;
     this.#sections = [{ id, sentences }, ...following];
-    sentences = this.#sections.flatMap((section) => section.sentences);
+    sentences = this.#sections.flatMap((section) =>
+      section.sentences.map((sentence) => ({ ...sentence, section: section.id })),
+    );
     this.#sentences = sentences;
     this.#batches = [];
     this.#planKey = `readest-mimo-plan-${md5(identity)}`;
@@ -207,21 +208,21 @@ export class MiMoTTSClient implements TTSClient {
       (batch) => index >= batch.first && index < batch.first + batch.sentences.length,
     );
     const batch = this.#batches[position]!;
-    if (batch.audio || batch.pending) return batch;
+    if (index === batch.first && (batch.audio || batch.pending)) return batch;
     const cached = await mimoSpeech.getCached(
       batch.sentences.map((s) => s.text).join('\n'),
       this.#config(),
     );
-    if (cached) {
+    if (cached && index === batch.first) {
       batch.audio = cached;
       batch.requested = true;
       this.#calibrate(batch, cached);
       return batch;
     }
     if (signal.aborted) return batch;
-    if (this.#nextPosition === null || index === batch.first) return batch;
-    // With no cached recording, spend the request on text AFTER the chosen
-    // sentence. Keep any already generated future batch's cache key intact.
+    if (index === batch.first) return batch;
+    // An explicit sentence start must be exact even inside a cached segment:
+    // cache its suffix instead of seeking to a guessed timestamp.
     let end = position + 1;
     while (
       end < this.#batches.length &&
@@ -363,19 +364,8 @@ export class MiMoTTSClient implements TTSClient {
     });
     return player;
   }
-  #bounds(batch: PreparedBatch, index: number, duration: number): { start: number; end: number } {
-    const weights = batch.sentences.map((s) => estimateMiMoSeconds(s.text));
-    const total = weights.reduce((a, b) => a + b, 0);
-    const local = index - batch.first;
-    const before = weights.slice(0, local).reduce((a, b) => a + b, 0);
-    return {
-      start: (duration * before) / total,
-      end: (duration * (before + weights[local]!)) / total,
-    };
-  }
   async #waitUntil(
     player: HTMLAudioElement,
-    end: number,
     signal: AbortSignal,
     generation: number,
     batch: PreparedBatch,
@@ -384,6 +374,7 @@ export class MiMoTTSClient implements TTSClient {
       const cleanup = () => {
         clearInterval(timer);
         player.removeEventListener('error', failed);
+        player.removeEventListener('ended', check);
         signal.removeEventListener('abort', done);
       };
       const done = () => {
@@ -401,12 +392,19 @@ export class MiMoTTSClient implements TTSClient {
           !signal.aborted &&
           generation === this.#generation &&
           !this.#paused &&
-          !this.controller?.stopAtChapterEnd &&
           !player.paused &&
           (batch.audio?.duration || player.duration) - player.currentTime <= 20 * this.#rate
         ) {
           const next = this.#batches[this.#batches.indexOf(batch) + 1];
-          if (next && !next.audio && !next.pending && !next.lookaheadStarted && !lookedAhead) {
+          if (
+            next &&
+            (!this.controller?.stopAtChapterEnd ||
+              next.sentences[0]?.section === batch.sentences[0]?.section) &&
+            !next.audio &&
+            !next.pending &&
+            !next.lookaheadStarted &&
+            !lookedAhead
+          ) {
             lookedAhead = true;
             next.lookaheadStarted = true;
             this.#lookaheadAbort?.abort();
@@ -430,28 +428,28 @@ export class MiMoTTSClient implements TTSClient {
               });
           }
         }
-        if (
-          signal.aborted ||
-          generation !== this.#generation ||
-          player.ended ||
-          player.currentTime >= end - 1e-6
-        )
-          done();
+        if (signal.aborted || generation !== this.#generation || player.ended) done();
       };
       let lookedAhead = false;
       const timer = setInterval(check, 50);
       player.addEventListener('error', failed, { once: true });
+      player.addEventListener('ended', check);
       signal.addEventListener('abort', done, { once: true });
       check();
     });
   }
-  async *speak(ssml: string, signal: AbortSignal, preload = false): AsyncIterable<TTSMessageEvent> {
+  async *speak(
+    ssml: string,
+    signal: AbortSignal,
+    preload = false,
+    selectionOnly = false,
+  ): AsyncIterable<TTSMessageEvent> {
     const { marks } = parseSSMLMarks(ssml, this.#lang);
     if (!marks.length || signal.aborted) return;
-    let first = this.#findMarks(marks);
+    let first = selectionOnly ? -1 : this.#findMarks(marks);
     let batches = this.#batches;
     if (first < 0) {
-      if (this.#sentences.length)
+      if (!selectionOnly && this.#sentences.length)
         throw new Error(
           'The selected speech text could not be matched to this chapter. No MiMo request was sent.',
         );
@@ -469,13 +467,11 @@ export class MiMoTTSClient implements TTSClient {
       });
     }
     const generation = this.#generation;
-    for (let offset = 0; offset < marks.length; offset++) {
-      if (signal.aborted || generation !== this.#generation) return;
-      const index = first + offset;
-      const batch =
-        batches === this.#batches
-          ? await this.#batchAt(index, signal)
-          : batches.find((b) => index >= b.first && index < b.first + b.sentences.length)!;
+    // Prepared reading consumes a complete segment, possibly spanning several
+    // original paragraphs. The controller resumes at its next CFI after end.
+    const planned = batches === this.#batches;
+    const selected = planned ? [await this.#batchAt(first, signal)] : batches;
+    for (const batch of selected) {
       if (signal.aborted || generation !== this.#generation) return;
       const audio = await this.#getAudio(batch, signal);
       if (signal.aborted || generation !== this.#generation) return;
@@ -483,20 +479,30 @@ export class MiMoTTSClient implements TTSClient {
       const newRecording = this.#loadedBatch !== batch;
       const player = await this.#load(batch, audio, signal);
       if (signal.aborted || generation !== this.#generation) return;
-      const bounds = this.#bounds(batch, index, audio.duration);
       if (newRecording || this.#nextPosition !== null) {
-        player.currentTime = Math.min(audio.duration, bounds.start + (this.#nextPosition || 0));
+        player.currentTime = Math.min(audio.duration, this.#nextPosition || 0);
         this.#nextPosition = null;
       }
       player.playbackRate = this.#rate;
-      // play() on an ended HTMLAudioElement restarts it from zero. Delayed
-      // text-cursor catch-up must never restart an already completed batch.
       if (!this.#paused && !player.ended && player.paused) await player.play();
-      this.controller?.dispatchSpeakMark(marks[offset]);
-      yield { code: 'boundary', mark: marks[offset]!.name };
-      await this.#waitUntil(player, bounds.end, signal, generation, batch);
+      const end = batch.first + batch.sentences.length;
+      const next = this.#sentences[end];
+      yield {
+        code: 'boundary',
+        mark: marks[0]!.name,
+        segment: planned
+          ? {
+              startCFI: batch.sentences[0]?.cfi,
+              endCFI: batch.sentences.at(-1)?.cfi,
+              nextCFI: next?.section === batch.sentences[0]?.section ? next?.cfi : undefined,
+            }
+          : undefined,
+      };
+      await this.#waitUntil(player, signal, generation, batch);
       if (signal.aborted || generation !== this.#generation) return;
-      this.#cursor = index + 1;
+      await this.#waitForResume(signal, generation);
+      if (signal.aborted || generation !== this.#generation) return;
+      if (planned) this.#cursor = end;
     }
     yield { code: 'end' };
   }
@@ -593,7 +599,8 @@ export class MiMoTTSClient implements TTSClient {
     return {
       wordBoundaries: false,
       mediaClock: false,
-      textHighlight: false,
+      textHighlight: true,
+      segmentBoundaries: true,
       gapControl: false,
       liveRateChange: true,
       continuousTimeline: true,

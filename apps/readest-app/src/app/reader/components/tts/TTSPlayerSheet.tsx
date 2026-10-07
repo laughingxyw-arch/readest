@@ -103,6 +103,7 @@ type TTSPlayerSheetProps = {
   // Lyric view (#5755). Present only when the engine aligns audio to the text;
   // supportsLyrics false keeps the cover player.
   supportsLyrics: boolean;
+  supportsSentenceSteps?: boolean;
   // Playing, but nothing audible yet — the transport button wears a ring.
   buffering: boolean;
   onGetLyrics: () => Promise<TTSLyrics | null>;
@@ -142,6 +143,7 @@ const TTSPlayerSheet = ({
   onSeekPreview,
   onGetPlaybackInfo,
   supportsLyrics,
+  supportsSentenceSteps = true,
   buffering,
   onGetLyrics,
   onGetActiveIndex,
@@ -481,7 +483,7 @@ const TTSPlayerSheet = ({
           <div dir='ltr' className='flex w-full items-center justify-between'>
             {/* Sentence-by-sentence and A-B repeat step by sentence, which a
                 paired audiobook does not have. */}
-            {!audioTransport && (
+            {!audioTransport && supportsSentenceSteps && (
               <button
                 type='button'
                 className={modeButtonClass(pauseAfterSentence)}
@@ -572,7 +574,7 @@ const TTSPlayerSheet = ({
                 )}
               </button>
             </div>
-            {!audioTransport && (
+            {!audioTransport && supportsSentenceSteps && (
               <button
                 type='button'
                 className={modeButtonClass(loopState !== 'off')}

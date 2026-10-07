@@ -136,7 +136,7 @@ export default function MiMoTTSSettings() {
         </li>
         <li>
           {_(
-            'Reading position is estimated; exact text highlighting and lyrics are unavailable for MiMo.',
+            'MiMo highlights the entire audio segment. Sentence timestamps, word highlighting and lyrics are unavailable.',
           )}
         </li>
       </Tips>

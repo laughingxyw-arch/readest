@@ -2,10 +2,18 @@ import { TTSGranularity, TTSVoice, TTSVoicesGroup } from './types';
 
 type TTSMessageCode = 'boundary' | 'error' | 'end';
 
+// One complete recording with known text bounds, without sentence timestamps.
+export interface TTSPlaybackSegment {
+  startCFI?: string;
+  endCFI?: string;
+  nextCFI?: string;
+}
+
 export interface TTSMessageEvent {
   code: TTSMessageCode;
   message?: string;
   mark?: string;
+  segment?: TTSPlaybackSegment;
 }
 
 // What the active engine can actually do, so the controller and UI degrade
@@ -37,6 +45,8 @@ export interface TTSCapabilities {
   bookDownload?: boolean;
   // Owns long-recording lookahead; paragraph preloads must not request audio.
   managesLookahead?: boolean;
+  // One boundary per recording; advance to nextCFI only after its actual end.
+  segmentBoundaries?: boolean;
 }
 
 export interface TTSClient {
@@ -44,7 +54,12 @@ export interface TTSClient {
   initialized: boolean;
   init(): Promise<boolean>;
   shutdown(): Promise<void>;
-  speak(ssml: string, signal: AbortSignal, preload?: boolean): AsyncIterable<TTSMessageEvent>;
+  speak(
+    ssml: string,
+    signal: AbortSignal,
+    preload?: boolean,
+    selectionOnly?: boolean,
+  ): AsyncIterable<TTSMessageEvent>;
   pause(): Promise<boolean>;
   resume(): Promise<boolean>;
   // `handover` marks the stop the controller performs between two consecutive

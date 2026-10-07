@@ -2522,5 +2522,5 @@
   "Your key stays on this device. Book text is sent directly to Xiaomi MiMo for speech generation.": "Key 仅保存在此设备。书籍文本会直接发送给小米 MiMo 生成语音。",
   "MiMo reading has no local daily request budget. Service pricing and limits follow your MiMo account.": "MiMo 朗读没有本机每日次数限制，服务价格和额度以你的 MiMo 账号为准。",
   "Playback prepares one recording ahead. Cached audio can be replayed without generating it again.": "播放时会提前准备下一段，重听缓存无需重新生成。",
-  "Reading position is estimated; exact text highlighting and lyrics are unavailable for MiMo.": "阅读位置为估计值，MiMo 暂不提供精确文字高亮和字幕。"
+  "MiMo highlights the entire audio segment. Sentence timestamps, word highlighting and lyrics are unavailable.": "MiMo 会高亮当前音频对应的整段文字，暂不提供逐句时间戳、逐字高亮和字幕。"
 }

@@ -316,6 +316,13 @@ describe('TTSPlayerSheet', () => {
     expect(screen.getByLabelText('Clear A-B Repeat')).toBeTruthy();
   });
 
+  test('segment narration hides sentence modes while keeping text navigation', () => {
+    render(<TTSPlayerSheet {...makeProps({ supportsSentenceSteps: false })} />);
+    expect(screen.queryByLabelText('Pause After Each Sentence')).toBeNull();
+    expect(screen.queryByLabelText('Set Repeat Start (A)')).toBeNull();
+    expect(screen.getByLabelText('Next Sentence')).toBeTruthy();
+  });
+
   test('a paired audiobook has no sentence modes', () => {
     render(<TTSPlayerSheet {...makeProps({ audioTransport: true })} />);
     expect(screen.queryByLabelText('Pause After Each Sentence')).toBeNull();

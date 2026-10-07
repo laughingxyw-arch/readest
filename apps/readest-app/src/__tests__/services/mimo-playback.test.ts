@@ -49,7 +49,7 @@ describe('MiMo recording playback', () => {
   it('uses the book position to distinguish identical sentences when starting from a selection', async () => {
     const cached = { blob: new Blob(['test']), duration: 10 };
     vi.spyOn(mimoSpeech, 'getCached').mockResolvedValue(cached);
-    const generate = vi.spyOn(mimoSpeech, 'generate');
+    const generate = vi.spyOn(mimoSpeech, 'generate').mockResolvedValue(cached);
     const controller = {
       getSpokenSentence: () => ({ cfi: 'second' }),
       dispatchSpeakMark: vi.fn(),
@@ -64,8 +64,8 @@ describe('MiMo recording playback', () => {
       .speak('<speak><mark name="0"/>相同的句子。</speak>', new AbortController().signal)
       [Symbol.asyncIterator]();
     await playback.next();
-    expect(MockAudio.instances[0]!.currentTime).toBeCloseTo(5);
-    expect(generate).not.toHaveBeenCalled();
+    expect(MockAudio.instances[0]!.currentTime).toBe(0);
+    expect(generate).toHaveBeenCalledWith('相同的句子。', expect.anything(), expect.anything());
     await client.shutdown();
     await playback.return?.();
   });
@@ -95,7 +95,7 @@ describe('MiMo recording playback', () => {
     await playback.return?.();
   });
 
-  it('keeps the same recording rolling across short chapter boundaries', async () => {
+  it('plays separate recordings across chapters without reading either chapter twice', async () => {
     const generate = vi
       .spyOn(mimoSpeech, 'generate')
       .mockResolvedValue({ blob: new Blob(['test']), duration: 10 });
@@ -111,10 +111,9 @@ describe('MiMo recording playback', () => {
       .speak('<speak><mark name="0"/>第一句话。</speak>', signal)
       [Symbol.asyncIterator]();
     await first.next();
-    expect(generate.mock.calls[0]![0]).toBe('第一句话。\n第二句话。');
+    expect(generate.mock.calls[0]![0]).toBe('第一句话。');
     const end = first.next();
-    const player = MockAudio.instances[0]!;
-    player.currentTime = 5.9;
+    MockAudio.instances[0]!.ended = true;
     await vi.advanceTimersByTimeAsync(60);
     await end;
     await client.stop(true);
@@ -123,9 +122,9 @@ describe('MiMo recording playback', () => {
       .speak('<speak><mark name="0"/>第二句话。</speak>', signal)
       [Symbol.asyncIterator]();
     await second.next();
-    expect(generate).toHaveBeenCalledOnce();
-    expect(MockAudio.instances).toHaveLength(1);
-    expect(player.currentTime).toBe(5.9);
+    expect(generate.mock.calls.at(-1)![0]).toBe('第二句话。');
+    expect(MockAudio.instances).toHaveLength(2);
+    expect(MockAudio.instances[1]!.currentTime).toBe(0);
     await client.shutdown();
     await second.return?.();
   });
@@ -154,47 +153,40 @@ describe('MiMo recording playback', () => {
     player.ended = true;
     player.paused = true;
     await vi.advanceTimersByTimeAsync(60);
-    expect((await next).value?.mark).toBe('b');
+    expect((await next).value?.code).toBe('end');
     expect(player.currentTime).toBe(10);
     expect(player.ended).toBe(true);
-    expect((await playback.next()).value?.code).toBe('end');
+    expect((await playback.next()).done).toBe(true);
     await client.shutdown();
   });
 
-  it('does not rewind or pause the recording when paragraph handover is delayed', async () => {
-    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({
-      blob: new Blob(['test']),
-      duration: 10,
-    });
+  it('does not advance a segment when its estimated sentence midpoint is passed', async () => {
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({ blob: new Blob(['test']), duration: 10 });
     const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-1', [
       { text: '第一句话。', lang: 'zh' },
       { text: '第二句话。', lang: 'zh' },
     ]);
-    const signal = new AbortController().signal;
-    const first = client
-      .speak('<speak><mark name="a"/>第一句话。</speak>', signal)
+    const playback = client
+      .speak('<speak><mark name="a"/>第一句话。</speak>', new AbortController().signal)
       [Symbol.asyncIterator]();
-    await first.next();
-    const end = first.next();
+    await playback.next();
+    const end = playback.next();
+    const done = vi.fn();
+    void end.then(done);
     const player = MockAudio.instances[0]!;
     player.currentTime = 5.9;
     await vi.advanceTimersByTimeAsync(60);
-    await end;
-    expect(player.paused).toBe(false);
-    await client.stop(true);
-    expect(player.paused).toBe(false);
-    const second = client
-      .speak('<speak><mark name="b"/>第二句话。</speak>', signal)
-      [Symbol.asyncIterator]();
-    await second.next();
+    expect(done).not.toHaveBeenCalled();
     expect(player.currentTime).toBe(5.9);
+    player.ended = true;
+    await vi.advanceTimersByTimeAsync(60);
+    expect((await end).value?.code).toBe('end');
     await client.shutdown();
-    await second.return?.();
   });
 
-  it('only seeks back to an estimated sentence boundary after an explicit navigation request', async () => {
+  it('restarts a cached segment only after an explicit navigation request', async () => {
     const generate = vi
       .spyOn(mimoSpeech, 'generate')
       .mockResolvedValue({ blob: new Blob(['test']), duration: 10 });
@@ -220,12 +212,14 @@ describe('MiMo recording playback', () => {
     await replay.return?.();
   });
 
-  it('reuses an existing full recording when continuous reading starts at a later sentence', async () => {
+  it('uses a suffix cache key instead of an approximate seek when starting inside a recording', async () => {
     vi.spyOn(mimoSpeech, 'getCached').mockResolvedValue({
       blob: new Blob(['test']),
       duration: 10,
     });
-    const generate = vi.spyOn(mimoSpeech, 'generate');
+    const generate = vi
+      .spyOn(mimoSpeech, 'generate')
+      .mockResolvedValue({ blob: new Blob(['test']), duration: 10 });
     const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-1', [
@@ -236,8 +230,8 @@ describe('MiMo recording playback', () => {
       .speak('<speak><mark name="second"/>第二句话。</speak>', new AbortController().signal)
       [Symbol.asyncIterator]();
     expect((await playback.next()).value?.mark).toBe('second');
-    expect(generate).not.toHaveBeenCalled();
-    expect(MockAudio.instances[0]!.currentTime).toBeCloseTo(5);
+    expect(generate).toHaveBeenCalledWith('第二句话。', expect.anything(), expect.anything());
+    expect(MockAudio.instances[0]!.currentTime).toBe(0);
     await client.shutdown();
     await playback.return?.();
   });
@@ -301,6 +295,7 @@ describe('MiMo recording playback', () => {
     expect(MockAudio.instances).toHaveLength(1);
     expect(player.currentTime).toBe(11);
     player.currentTime = 30;
+    player.ended = true;
     await vi.advanceTimersByTimeAsync(60);
     await end;
     await client.shutdown();
@@ -376,17 +371,12 @@ describe('MiMo recording playback', () => {
     const end = first.next();
     player.currentTime = 5;
     await vi.advanceTimersByTimeAsync(60);
-    expect((await end).value?.code).toBe('end');
-    const second = client
-      .speak('<speak><mark name="b"/>第二句话。</speak>', signal)
-      [Symbol.asyncIterator]();
-    expect((await second.next()).value?.mark).toBe('b');
-    expect(MockAudio.instances).toHaveLength(1);
     expect(player.currentTime).toBe(5);
-    const secondEnd = second.next();
+    expect(generate).toHaveBeenCalledOnce();
     player.currentTime = 10;
+    player.ended = true;
     await vi.advanceTimersByTimeAsync(60);
-    expect((await secondEnd).value?.code).toBe('end');
+    expect((await end).value?.code).toBe('end');
     await client.shutdown();
   });
 

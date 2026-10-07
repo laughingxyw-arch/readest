@@ -55,6 +55,8 @@ export interface MiMoSentence {
   text: string;
   lang: string;
   cfi?: string;
+  section?: string;
+  paragraph?: string;
 }
 export interface MiMoBatch {
   sentences: MiMoSentence[];
@@ -84,7 +86,10 @@ export function buildMiMoBatches(
     const seconds = estimateMiMoSeconds(sentence.text);
     if (
       batch.sentences.length &&
-      ((batch.estimatedSeconds + seconds) * durationScale > minutes * 60 ||
+      (sentence.section !== batch.sentences[0]!.section ||
+        (sentence.paragraph !== batch.sentences.at(-1)!.paragraph &&
+          batch.estimatedSeconds * durationScale >= minutes * 30) ||
+        (batch.estimatedSeconds + seconds) * durationScale > minutes * 60 ||
         chars + sentence.text.length > 2000)
     ) {
       batches.push(batch);
