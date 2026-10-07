@@ -1195,7 +1195,7 @@ const Annotator: React.FC<{ bookKey: string; contentInsets: Insets; gridInsets?:
           handleTranslation();
           break;
         case 'tts':
-          handleSpeakText(true);
+          handleSpeakText(false);
           break;
         case 'share':
           handleShare();
@@ -1812,10 +1812,8 @@ const Annotator: React.FC<{ bookKey: string; contentInsets: Insets; gridInsets?:
     setShowDeepLPopup(true);
   };
 
-  // `oneTime` is required rather than defaulted: it decides whether this reads
-  // the selection and stops or starts an open-ended session from it, and every
-  // entry point here means the former. Defaulting it silently turned Ctrl/Cmd+R
-  // into "start the book from this paragraph" (#5011).
+  // The toolbar and quick action start continuous reading from the selection.
+  // Keep the mode explicit so Ctrl/Cmd+R can still read only the selection.
   const handleSpeakText = async (oneTime: boolean) => {
     if (!selection || !selection.text) return;
     // TTS walks the main view's documents; a popup-window range can't seed it
@@ -2499,7 +2497,7 @@ const Annotator: React.FC<{ bookKey: string; contentInsets: Insets; gridInsets?:
         return {
           tooltipText: _(label),
           Icon,
-          onClick: () => handleSpeakText(true),
+          onClick: () => handleSpeakText(false),
           disabled: !!selection?.popup,
         };
       case 'proofread':

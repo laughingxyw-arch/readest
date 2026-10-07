@@ -431,11 +431,11 @@ describe('useTTSControl reading a selection aloud', () => {
     cleanup();
   });
 
-  const speakSelection = async () => {
+  const speakSelection = async (oneTime = true) => {
     render(<Harness />);
     const range = new Range();
     await act(async () => {
-      const p = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1', range, oneTime: true });
+      const p = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1', range, oneTime });
       for (let i = 0; i < 10; i++) await Promise.resolve();
       while (pendingInitResolvers.length > 0) pendingInitResolvers.shift()!();
       await p;
@@ -463,6 +463,13 @@ describe('useTTSControl reading a selection aloud', () => {
 
     expect(mockView.tts.from).not.toHaveBeenCalled();
     expect(controller.speak).toHaveBeenCalledWith(expect.anything(), true, expect.any(Function));
+  });
+
+  it('uses the book range for continuous selection reading instead of synthesizing an excerpt', async () => {
+    const { range, controller } = await speakSelection(false);
+
+    expect(controller.startFromRange).toHaveBeenCalledWith(range);
+    expect(controller.speak).toHaveBeenCalledWith(expect.anything(), false, expect.any(Function));
   });
 });
 

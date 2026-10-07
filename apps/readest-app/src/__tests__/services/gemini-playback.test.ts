@@ -41,6 +41,28 @@ afterEach(() => {
 });
 
 describe('Gemini recording playback', () => {
+  it('generates the full prepared batch when continuous reading starts at a later sentence', async () => {
+    const generate = vi.spyOn(geminiSpeech, 'generate').mockResolvedValue({
+      blob: new Blob(['test']),
+      duration: 10,
+    });
+    const client = new GeminiTTSClient();
+    await client.init();
+    client.prepareSection('chapter-1', [
+      { text: '第一句话。', lang: 'zh' },
+      { text: '第二句话。', lang: 'zh' },
+    ]);
+    const playback = client
+      .speak('<speak><mark name="second"/>第二句话。</speak>', new AbortController().signal)
+      [Symbol.asyncIterator]();
+    expect((await playback.next()).value?.mark).toBe('second');
+    expect(generate).toHaveBeenCalledOnce();
+    expect(generate).toHaveBeenCalledWith('第一句话。\n第二句话。', expect.anything());
+    expect(MockAudio.instances[0]!.currentTime).toBeCloseTo(5);
+    await client.shutdown();
+    await playback.return?.();
+  });
+
   it('keeps playback paused when generation finishes after Pause is pressed', async () => {
     let finish!: (audio: { blob: Blob; duration: number }) => void;
     vi.spyOn(geminiSpeech, 'generate').mockImplementation(

@@ -1,4 +1,5 @@
-import { act, cleanup, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import type { TextSelection } from '@/utils/sel';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { useNotebookDocumentStore } from '@/store/notebookDocumentStore';
 import { eventDispatcher } from '@/utils/event';
@@ -16,6 +17,7 @@ const h = vi.hoisted(() => ({
   saveConfig: vi.fn(),
   updateBooknotes: vi.fn(),
   view: null as unknown,
+  select: null as null | ((selection: TextSelection) => void),
 }));
 
 const settings = {
@@ -135,30 +137,33 @@ vi.mock('@/app/reader/hooks/useRendererInputListeners', () => ({
 }));
 
 vi.mock('@/app/reader/hooks/useTextSelector', () => ({
-  useTextSelector: () => ({
-    isTextSelected: { current: false },
-    isInstantAnnotating: { current: false },
-    handleScroll: vi.fn(),
-    handleTouchStart: vi.fn(),
-    handleTouchMove: vi.fn(),
-    handleTouchEnd: vi.fn(),
-    handleMouseDown: vi.fn(),
-    handlePointerDown: vi.fn(),
-    handlePointerMove: vi.fn(),
-    handleNativeTouchMove: vi.fn(),
-    handlePointerCancel: vi.fn(),
-    handlePointerUp: vi.fn(),
-    handleDoubleClick: vi.fn(),
-    handleSelectionchange: vi.fn(),
-    handleShowPopup: vi.fn(),
-    handleUpToPopup: vi.fn(),
-    handleContextmenu: vi.fn(),
-    dragSelectionTo: vi.fn(),
-    suppressNativeSelectionHandles: vi.fn(),
-    noteAutoTurnPoint: { current: null },
-    cancelAutoTurn: vi.fn(),
-    onAutoTurn: vi.fn(),
-  }),
+  useTextSelector: (_key: string, _insets: unknown, select: (selection: TextSelection) => void) => {
+    h.select = select;
+    return {
+      isTextSelected: { current: false },
+      isInstantAnnotating: { current: false },
+      handleScroll: vi.fn(),
+      handleTouchStart: vi.fn(),
+      handleTouchMove: vi.fn(),
+      handleTouchEnd: vi.fn(),
+      handleMouseDown: vi.fn(),
+      handlePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(),
+      handleNativeTouchMove: vi.fn(),
+      handlePointerCancel: vi.fn(),
+      handlePointerUp: vi.fn(),
+      handleDoubleClick: vi.fn(),
+      handleSelectionchange: vi.fn(),
+      handleShowPopup: vi.fn(),
+      handleUpToPopup: vi.fn(),
+      handleContextmenu: vi.fn(),
+      dragSelectionTo: vi.fn(),
+      suppressNativeSelectionHandles: vi.fn(),
+      noteAutoTurnPoint: { current: null },
+      cancelAutoTurn: vi.fn(),
+      onAutoTurn: vi.fn(),
+    };
+  },
 }));
 
 vi.mock('@/services/transformService', () => ({
@@ -167,7 +172,30 @@ vi.mock('@/services/transformService', () => ({
 
 vi.mock('@/app/reader/components/annotator/AnnotationRangeEditor', () => ({ default: () => null }));
 vi.mock('@/app/reader/components/annotator/SelectionRangeEditor', () => ({ default: () => null }));
-vi.mock('@/app/reader/components/annotator/AnnotationPopup', () => ({ default: () => null }));
+vi.mock('@/app/reader/components/annotator/AnnotationPopup', () => ({
+  default: ({
+    buttons,
+  }: {
+    buttons: { tooltipText: string; onClick: () => void; disabled?: boolean }[];
+  }) => (
+    <div>
+      {buttons.map((button) => (
+        <button
+          type='button'
+          key={button.tooltipText}
+          onClick={button.onClick}
+          disabled={button.disabled}
+        >
+          {button.tooltipText}
+        </button>
+      ))}
+    </div>
+  ),
+}));
+vi.mock('@/utils/sel', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/utils/sel')>()),
+  getPosition: () => ({ point: { x: 100, y: 100 }, dir: 'down' }),
+}));
 vi.mock('@/app/reader/components/annotator/DictionaryPopup', () => ({ default: () => null }));
 vi.mock('@/app/reader/components/annotator/DictionarySheet', () => ({ default: () => null }));
 vi.mock('@/app/reader/components/annotator/TranslatorPopup', () => ({ default: () => null }));
@@ -230,6 +258,7 @@ describe('Annotator popup shortcuts', () => {
     h.view = null;
     h.config.booknotes = [];
     h.viewSettings.copyToNotebook = false;
+    h.viewSettings.annotationToolbarItems = [];
     h.updateBooknotes.mockImplementation(() => h.config);
     useNotebookDocumentStore.getState().reset();
     vi.clearAllMocks();
@@ -237,6 +266,7 @@ describe('Annotator popup shortcuts', () => {
 
   afterEach(() => {
     cleanup();
+    document.getElementById('gridcell-book-1')?.remove();
   });
 
   test.each([
@@ -295,6 +325,44 @@ describe('Annotator popup shortcuts', () => {
     expect(handled).toBe(true);
     expect(speaks).toHaveLength(1);
     expect(speaks[0]!.oneTime).toBe(true);
+  });
+
+  test('the selection toolbar starts continuous reading from the selected position', async () => {
+    h.viewSettings.annotationToolbarItems = ['tts'];
+    const grid = document.createElement('div');
+    grid.id = 'gridcell-book-1';
+    document.body.append(grid);
+    const paragraph = document.createElement('p');
+    paragraph.textContent = 'First sentence. Second sentence. Third sentence.';
+    grid.append(paragraph);
+    const range = document.createRange();
+    range.setStart(paragraph.firstChild!, 16);
+    range.setEnd(paragraph.firstChild!, 22);
+    const deselect = vi.fn();
+    h.view = { deselect };
+    render(<Annotator bookKey='book-1' contentInsets={{ top: 0, right: 0, bottom: 0, left: 0 }} />);
+    await act(async () => {
+      h.select?.({ key: 'book-1', text: range.toString(), range, index: 3, page: 4 });
+    });
+    const speaks: { bookKey: string; oneTime: boolean; range: Range; index: number }[] = [];
+    const capture = (event: CustomEvent) => {
+      speaks.push(event.detail);
+    };
+    eventDispatcher.on('tts-speak', capture);
+    try {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Read aloud from here' }));
+      });
+      expect(speaks).toHaveLength(1);
+      expect(speaks[0]).toMatchObject({ bookKey: 'book-1', oneTime: false, index: 3 });
+      expect(speaks[0]!.range).not.toBe(range);
+      expect(speaks[0]!.range.startContainer).toBe(paragraph.firstChild);
+      expect(speaks[0]!.range.startOffset).toBe(16);
+      expect(deselect).toHaveBeenCalledOnce();
+    } finally {
+      eventDispatcher.off('tts-speak', capture);
+      grid.remove();
+    }
   });
 
   test('stores copied excerpts without inserting them into the Notebook editor', async () => {

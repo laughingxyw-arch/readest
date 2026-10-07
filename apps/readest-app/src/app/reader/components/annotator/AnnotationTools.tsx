@@ -86,8 +86,8 @@ export const annotationToolButtons = createAnnotationToolButtons([
   },
   {
     type: 'tts',
-    label: _('Speak'),
-    tooltip: _('Read text aloud after selection'),
+    label: _('Read aloud from here'),
+    tooltip: _('Start continuous reading from the selected position'),
     Icon: FaHeadphones,
     quickAction: true,
   },
