@@ -386,16 +386,18 @@ export class MiMoTTSClient implements TTSClient {
         reject(new Error('MiMo audio playback failed.'));
       };
       const check = () => {
+        const batchIndex = this.#batches.indexOf(batch);
         // At most one recording ahead, only near the audible end. Paused or
         // abandoned playback never starts new lookahead requests.
         if (
+          batchIndex >= 0 &&
           !signal.aborted &&
           generation === this.#generation &&
           !this.#paused &&
           !player.paused &&
           (batch.audio?.duration || player.duration) - player.currentTime <= 20 * this.#rate
         ) {
-          const next = this.#batches[this.#batches.indexOf(batch) + 1];
+          const next = this.#batches[batchIndex + 1];
           if (
             next &&
             (!this.controller?.stopAtChapterEnd ||
@@ -515,7 +517,8 @@ export class MiMoTTSClient implements TTSClient {
   async resume(): Promise<boolean> {
     this.#paused = false;
     for (const wake of this.#resumeWaiters) wake();
-    if (this.#audio && !this.#audio.ended) await this.#audio.play();
+    // A navigation offset belongs to the next speak(), not the old recording.
+    if (this.#audio && !this.#audio.ended && this.#nextPosition === null) await this.#audio.play();
     return true;
   }
   async stop(handover = false): Promise<void> {

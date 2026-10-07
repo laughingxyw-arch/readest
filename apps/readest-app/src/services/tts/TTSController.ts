@@ -628,9 +628,14 @@ export class TTSController extends EventTarget {
     return (range: Range) => {
       if (this.ttsClient.getCapabilities().textHighlight === false) return;
       if (this.ttsClient.getCapabilities().segmentBoundaries) {
-        const segmentRange = this.#resolveSpeechSegment(this.#ttsDoc);
-        if (!segmentRange) return;
-        range = segmentRange;
+        if (this.#speechSegment) {
+          const segmentRange = this.#resolveSpeechSegment(this.#ttsDoc);
+          if (!segmentRange) return;
+          range = segmentRange;
+        } else if (this.state === 'playing') {
+          // Wait for an audible segment, but keep paused navigation previews.
+          return;
+        }
       }
       // Suppress the sentence highlight that foliate's setMark draws when the
       // active client highlights word-by-word. The flag is only set around the
@@ -2017,6 +2022,17 @@ export class TTSController extends EventTarget {
 
   async start() {
     await this.initViewTTS();
+    // A paused recording still owns its speak task. Resume that task instead
+    // of handing over while the same recording is already becoming audible.
+    if (
+      this.state === 'paused' &&
+      this.ttsClient.getCapabilities().segmentBoundaries &&
+      this.#currentSpeakAbortController &&
+      !this.#currentSpeakAbortController.signal.aborted
+    ) {
+      await this.resume();
+      return;
+    }
     // Always resume from the current list position instead of calling tts.start().
     // tts.start() resets the TTS list to position 0 (section beginning), which is
     // wrong when state transiently becomes 'stopped' during forward()/backward()
@@ -2292,6 +2308,9 @@ export class TTSController extends EventTarget {
   #getCurrentPlaybackRange(): Range | undefined {
     const tts = this.#getTts();
     if (!tts) return undefined;
+    if (this.ttsClient.getCapabilities().segmentBoundaries && this.#speechSegment) {
+      return this.#resolveSpeechSegment(this.#ttsDoc) ?? undefined;
+    }
     if (this.ttsClient.getCapabilities().textHighlight === false && 'getPlaybackRange' in tts) {
       return tts.getPlaybackRange(this.ttsClient.getChunkProgress?.());
     }
