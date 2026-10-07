@@ -93,6 +93,7 @@ vi.mock('@/app/reader/components/tts/TTSChaptersView', () => ({
 }));
 
 import TTSPlayerSheet from '@/app/reader/components/tts/TTSPlayerSheet';
+import { mimoSpeech } from '@/services/tts/mimo';
 
 const waitFor = <T,>(callback: () => T | Promise<T>) =>
   waitForWithOptions(callback, { interval: 1 });
@@ -120,6 +121,7 @@ const makeProps = (overrides: Record<string, unknown> = {}) => ({
   chapterRemainingSec: null as number | null,
   onClose: vi.fn(),
   onTogglePlay: vi.fn(),
+  onPause: vi.fn().mockResolvedValue(undefined),
   onBackward: vi.fn(),
   onForward: vi.fn(),
   loopState: 'off' as 'off' | 'a' | 'ab',
@@ -164,6 +166,67 @@ const makeProps = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe('TTSPlayerSheet', () => {
+  test('keeps the MiMo voice picker open and pauses reading before previewing a selection', async () => {
+    const player = Object.assign(new EventTarget(), {
+      src: '',
+      play: vi.fn().mockResolvedValue(undefined),
+      pause: vi.fn(),
+      load: vi.fn(),
+      removeAttribute: vi.fn(),
+    });
+    vi.stubGlobal('Audio', new Proxy(Audio, { construct: () => player }));
+    vi.stubGlobal(
+      'URL',
+      class extends URL {
+        static override createObjectURL() {
+          return 'blob:sample';
+        }
+        static override revokeObjectURL() {}
+      },
+    );
+    const generate = vi
+      .spyOn(mimoSpeech, 'generate')
+      .mockResolvedValue({ blob: new Blob(['wav']), duration: 3 });
+    let paused!: () => void;
+    const props = makeProps({
+      onGetVoices: vi.fn().mockResolvedValue([
+        {
+          id: 'mimo',
+          name: 'MiMo TTS',
+          voices: [{ id: 'mimo:Mia', name: 'Mia', lang: 'zh', disabled: false }],
+        },
+      ]),
+    });
+    props.onPause.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          paused = resolve;
+        }),
+    );
+    try {
+      render(<TTSPlayerSheet {...props} />);
+      fireEvent.click(screen.getByLabelText('Voice'));
+      await waitFor(() => screen.getByText('Mia'));
+      fireEvent.click(screen.getByText('Mia'));
+      expect(screen.getByText('Select Voice')).toBeTruthy();
+      expect(screen.getByRole('status').textContent).toBe('Loading...');
+      expect(screen.getByText('Mia').closest('button')!.disabled).toBe(true);
+      expect(generate).not.toHaveBeenCalled();
+      await paused();
+      await waitFor(() => expect(player.play).toHaveBeenCalledOnce());
+      expect(props.onSetVoice).toHaveBeenCalledWith('mimo:Mia', 'zh');
+      expect(generate.mock.calls[0]![1].voice).toBe('Mia');
+      expect(screen.getByRole('status').textContent).toBe('Previewing voice');
+      expect(screen.getByText('Mia').closest('button')!.disabled).toBe(false);
+      expect(viewSettings['ttsVoice']).toBe('mimo:Mia');
+      fireEvent.click(screen.getByLabelText('Go Back'));
+      expect(player.pause).toHaveBeenCalled();
+    } finally {
+      cleanup();
+      generate.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
   beforeEach(() => {
     viewSettings['ttsRate'] = 1.0;
     viewSettings['ttsSentenceGap'] = 0.15;

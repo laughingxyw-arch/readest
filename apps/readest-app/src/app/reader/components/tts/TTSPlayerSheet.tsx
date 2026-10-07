@@ -47,6 +47,7 @@ import SpeedRuler, { formatRate } from './SpeedRuler';
 import TTSChaptersView from './TTSChaptersView';
 import { TTS_STOP_AT_CHAPTER_END } from '@/services/tts/TTSSessionManager';
 import type { UseTTSDownloadsResult } from '@/app/reader/hooks/useTTSDownloads';
+import { MIMO_VOICE_SAMPLE, useMiMoVoicePreview } from './useMiMoVoicePreview';
 
 type SheetView = 'main' | 'speed' | 'voice' | 'timer' | 'chapters';
 
@@ -87,6 +88,7 @@ type TTSPlayerSheetProps = {
   chapterRemainingSec: number | null;
   onClose: () => void;
   onTogglePlay: () => void;
+  onPause: () => Promise<void>;
   onBackward: (byMark: boolean) => void;
   onForward: (byMark: boolean) => void;
   loopState: TTSLoopState;
@@ -129,6 +131,7 @@ const TTSPlayerSheet = ({
   chapterRemainingSec,
   onClose,
   onTogglePlay,
+  onPause,
   onBackward,
   onForward,
   loopState,
@@ -182,6 +185,7 @@ const TTSPlayerSheet = ({
   const [voiceGroups, setVoiceGroups] = useState<TTSVoicesGroup[]>([]);
   const [rate, setRate] = useState(viewSettings?.ttsRate ?? 1.0);
   const [selectedVoice, setSelectedVoice] = useState('');
+  const voicePreview = useMiMoVoicePreview(isOpen && view === 'voice');
   const timerLabel = useCountdownLabel(timeoutTimestamp);
   const iconSize18 = useResponsiveSize(18);
   const iconSize24 = useResponsiveSize(24);
@@ -283,7 +287,16 @@ const TTSPlayerSheet = ({
   };
 
   const handleSelectVoice = (voice: string, lang: string) => {
-    onSetVoice(voice, lang);
+    if (voice.startsWith('mimo:')) {
+      void voicePreview.play(voice.slice('mimo:'.length), async (signal) => {
+        await onPause();
+        if (!signal.aborted) onSetVoice(voice, lang);
+      });
+    } else {
+      voicePreview.stop();
+      onSetVoice(voice, lang);
+      setView('main');
+    }
     setSelectedVoice(voice);
     const vs = getViewSettings(bookKey)!;
     vs.ttsVoice = voice;
@@ -294,7 +307,6 @@ const TTSPlayerSheet = ({
       vs.ttsUseNarration = voice === MEDIA_OVERLAY_VOICE_ID;
     }
     setViewSettings(bookKey, vs);
-    setView('main');
   };
 
   const handleSelectTimeout = (value: number) => {
@@ -677,11 +689,28 @@ const TTSPlayerSheet = ({
                       count: voiceGroup.voices.length,
                     })}
               </div>
+              {voiceGroup.voices.some((voice) => voice.id.startsWith('mimo:')) && (
+                <div className='text-base-content/60 flex items-center gap-2 px-2 py-2 text-sm'>
+                  <p className='flex-1'>{MIMO_VOICE_SAMPLE}</p>
+                  {voicePreview.status !== 'idle' && (
+                    <button
+                      type='button'
+                      onClick={voicePreview.stop}
+                      className='btn btn-ghost btn-sm shrink-0'
+                    >
+                      {_('Stop preview')}
+                    </button>
+                  )}
+                </div>
+              )}
               {voiceGroup.voices.map((voice) => (
                 <button
                   key={`${voiceGroup.id}-${voice.id}`}
                   type='button'
-                  disabled={voice.disabled}
+                  disabled={
+                    voice.disabled ||
+                    (selectedVoice === voice.id && voicePreview.status === 'loading')
+                  }
                   onClick={() => handleSelectVoice(voice.id, voice.lang)}
                   className='flex w-full items-center gap-2 rounded-lg px-2 py-2 text-start'
                 >
@@ -696,10 +725,20 @@ const TTSPlayerSheet = ({
                   >
                     {_(voice.name)}
                   </span>
+                  {selectedVoice === voice.id && voicePreview.status !== 'idle' && (
+                    <span role='status' className='text-base-content/60 ms-auto text-sm'>
+                      {voicePreview.status === 'loading' ? _('Loading...') : _('Previewing voice')}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
           ))}
+          {voicePreview.error && (
+            <p role='alert' className='px-2 py-1 text-sm'>
+              {_(voicePreview.error)}
+            </p>
+          )}
         </div>
       )}
       {view === 'timer' && (

@@ -66,7 +66,7 @@ jobs:
         working-directory: apps/readest-app
         run: |
           pnpm lint
-          pnpm test --run --maxWorkers=2 src/__tests__/services/mimo-tts.test.ts src/__tests__/services/mimo-playback.test.ts src/__tests__/services/mimo-controller.test.ts src/__tests__/services/mimo-navigation.test.ts src/__tests__/components/settings/MiMoTTSSettings.test.tsx src/__tests__/services/tts-controller.test.ts src/__tests__/components/annotator/AnnotatorShortcuts.test.tsx src/__tests__/hooks/useTTSControl.test.tsx
+          pnpm test --run --maxWorkers=2 src/__tests__/services/mimo-tts.test.ts src/__tests__/services/mimo-playback.test.ts src/__tests__/services/mimo-controller.test.ts src/__tests__/services/mimo-navigation.test.ts src/__tests__/components/settings/MiMoTTSSettings.test.tsx src/__tests__/services/tts-controller.test.ts src/__tests__/components/annotator/AnnotatorShortcuts.test.tsx src/__tests__/hooks/useTTSControl.test.tsx src/__tests__/hooks/useMiMoVoicePreview.test.tsx src/__tests__/components/tts/TTSPlayerSheet.test.tsx
 
       - name: Build installable ARM64 test APK
         working-directory: apps/readest-app

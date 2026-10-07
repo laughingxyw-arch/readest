@@ -134,6 +134,7 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
           chapterRemainingSec={tts.chapterRemainingSec}
           onClose={() => setShowPlayerSheet(false)}
           onTogglePlay={tts.handleTogglePlay}
+          onPause={tts.handlePause}
           onBackward={tts.handleBackward}
           onForward={tts.handleForward}
           loopState={tts.loopState}
