@@ -66,7 +66,7 @@ jobs:
         working-directory: apps/readest-app
         run: |
           pnpm lint
-          pnpm test --run --maxWorkers=2 src/__tests__/services/gemini-tts.test.ts src/__tests__/services/gemini-playback.test.ts src/__tests__/components/settings/GeminiTTSSettings.test.tsx src/__tests__/services/tts-controller.test.ts src/__tests__/components/annotator/AnnotatorShortcuts.test.tsx src/__tests__/hooks/useTTSControl.test.tsx
+          pnpm test --run --maxWorkers=2 src/__tests__/services/gemini-tts.test.ts src/__tests__/services/gemini-playback.test.ts src/__tests__/services/gemini-controller.test.ts src/__tests__/components/settings/GeminiTTSSettings.test.tsx src/__tests__/services/tts-controller.test.ts src/__tests__/components/annotator/AnnotatorShortcuts.test.tsx src/__tests__/hooks/useTTSControl.test.tsx
 
       - name: Build installable ARM64 test APK
         working-directory: apps/readest-app

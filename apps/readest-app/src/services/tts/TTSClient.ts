@@ -35,6 +35,8 @@ export interface TTSCapabilities {
   scheduledGaps?: boolean;
   // Allows the existing sentence-pack downloader for this engine.
   bookDownload?: boolean;
+  // Owns long-recording lookahead; paragraph preloads must not request audio.
+  managesLookahead?: boolean;
 }
 
 export interface TTSClient {

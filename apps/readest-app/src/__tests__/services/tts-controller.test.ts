@@ -1868,6 +1868,14 @@ describe('TTSController', () => {
   });
 
   describe('preloadNextSSML', () => {
+    test('does not request paragraph lookahead when the client manages long recordings', async () => {
+      controller.ttsClient.getCapabilities = vi.fn().mockReturnValue({ managesLookahead: true });
+      mockView.tts = { next: vi.fn(), prev: vi.fn(), doc: {} } as unknown as FoliateView['tts'];
+      await controller.preloadNextSSML(4);
+      expect(mockView.tts!.next).not.toHaveBeenCalled();
+      expect(controller.ttsClient.speak).not.toHaveBeenCalled();
+    });
+
     test('keeps inline readings in synthesized speech when the option is disabled', async () => {
       mockView.tts = {
         next: vi

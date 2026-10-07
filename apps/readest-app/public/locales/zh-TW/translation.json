@@ -2501,5 +2501,18 @@
   "Set Repeat Start (A)": "設定複讀起點 (A)",
   "Set Repeat End (B)": "設定複讀終點 (B)",
   "Clear A-B Repeat": "清除 A-B 複讀",
-  "Pause After Each Sentence": "每句後暫停"
+  "Pause After Each Sentence": "每句後暫停",
+  "Reserve requests": "備用生成次數",
+  "The local daily Gemini request budget has been reached. Cached audio still works.": "今天的 Gemini 本機生成次數已用完。已有快取仍可朗讀。",
+  "The regular daily Gemini request budget has been reached. Enable one reserve request in Gemini TTS settings. Cached audio still works.": "今天的常規生成次數已用完。可在「設定 → 朗讀 → Gemini TTS」啟用 1 次備用額度，已有快取仍可朗讀。",
+  "Gemini speech generation failed. Check your key and quota in AI Studio, then allow a retry in Gemini TTS settings.": "Gemini 生成失敗。請在 AI Studio 檢查 Key 和額度，再到 Gemini TTS 設定中允許重試。",
+  "{{regular}} regular requests and {{reserve}} reserve requests per day.": "每天 {{regular}} 次常規生成，另保留 {{reserve}} 次備用。",
+  "Use one reserve request": "啟用 1 次備用額度",
+  "One reserve request enabled. Start reading again to use it.": "已啟用 1 次備用額度。重新開始朗讀即可使用。",
+  "Failed speech requests": "生成失敗後的重試",
+  "Failed requests are not retried automatically.": "生成失敗後不會自動重試，以免繼續消耗次數。",
+  "Allow retry": "允許重試",
+  "Retry enabled. Start reading again.": "已允許重試。請重新開始朗讀。",
+  "Lookahead prepares at most one recording near the end of playback. It never uses reserve requests.": "快聽完時最多提前準備下一段音訊，不會動用備用次數。",
+  "Batch length adapts to measured narration speed. Cached recordings keep their original text and can be replayed without new requests.": "生成長度會按實際朗讀速度調整。已有快取保持原文，重聽不消耗生成次數。"
 }

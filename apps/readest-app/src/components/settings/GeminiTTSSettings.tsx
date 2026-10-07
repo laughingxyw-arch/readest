@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
 import {
   BoxedList,
@@ -13,6 +13,10 @@ import {
   geminiSpeech,
   getGeminiConfig,
   getGeminiUsage,
+  getGeminiRegularLimit,
+  getGeminiReserveAvailable,
+  grantGeminiReserveRequest,
+  GEMINI_USAGE_EVENT,
   setGeminiConfig,
 } from '@/services/tts/gemini';
 import { TTSUtils } from '@/services/tts/TTSUtils';
@@ -22,6 +26,18 @@ export default function GeminiTTSSettings() {
   const [config, setConfig] = useState(getGeminiConfig);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
+  const [budget, setBudget] = useState(() => ({
+    used: getGeminiUsage(config),
+    available: getGeminiReserveAvailable(config),
+  }));
+  const { used, available } = budget;
+  useEffect(() => {
+    const refresh = () =>
+      setBudget({ used: getGeminiUsage(config), available: getGeminiReserveAvailable(config) });
+    refresh();
+    window.addEventListener(GEMINI_USAGE_EVENT, refresh);
+    return () => window.removeEventListener(GEMINI_USAGE_EVENT, refresh);
+  }, [config]);
   const update = (changes: Partial<typeof config>) => {
     setConfig({ ...config, ...changes });
     setStatus('');
@@ -33,6 +49,7 @@ export default function GeminiTTSSettings() {
         return;
       }
       setGeminiConfig({ ...config, apiKey: config.apiKey.trim() });
+      setConfig(getGeminiConfig());
       if (config.enabled) {
         TTSUtils.setPreferredClient('gemini-tts');
         TTSUtils.setPreferredVoice('gemini-tts', 'zh', `gemini:${config.voice}`);
@@ -53,6 +70,12 @@ export default function GeminiTTSSettings() {
       setStatus(_('Could not clear the Gemini audio cache.'));
     } finally {
       setBusy(false);
+    }
+  };
+  const useReserve = () => {
+    if (grantGeminiReserveRequest(config)) {
+      geminiSpeech.retryFailedRequests();
+      setStatus(_('One reserve request enabled. Start reading again to use it.'));
     }
   };
   return (
@@ -106,7 +129,7 @@ export default function GeminiTTSSettings() {
         </SettingsRow>
         <SettingsRow
           label={_('Local daily request budget')}
-          description={`${getGeminiUsage(config)} / ${config.dailyLimit} ${_('requests used on this device')}`}
+          description={`${used} / ${config.dailyLimit} ${_('requests used on this device')}`}
         >
           <SettingsInput
             aria-label={_('Local daily request budget')}
@@ -116,6 +139,37 @@ export default function GeminiTTSSettings() {
             value={config.dailyLimit}
             onChange={(e) => update({ dailyLimit: Number(e.target.value) || 10 })}
           />
+        </SettingsRow>
+        <SettingsRow
+          label={_('Reserve requests')}
+          description={_('{{regular}} regular requests and {{reserve}} reserve requests per day.', {
+            regular: getGeminiRegularLimit(config),
+            reserve: config.dailyLimit - getGeminiRegularLimit(config),
+          })}
+        >
+          <button
+            type='button'
+            className='btn btn-ghost btn-sm eink-bordered'
+            disabled={used < getGeminiRegularLimit(config) || available === 0}
+            onClick={useReserve}
+          >
+            {_('Use one reserve request')}
+          </button>
+        </SettingsRow>
+        <SettingsRow
+          label={_('Failed speech requests')}
+          description={_('Failed requests are not retried automatically.')}
+        >
+          <button
+            type='button'
+            className='btn btn-ghost btn-sm eink-bordered'
+            onClick={() => {
+              geminiSpeech.retryFailedRequests();
+              setStatus(_('Retry enabled. Start reading again.'));
+            }}
+          >
+            {_('Allow retry')}
+          </button>
         </SettingsRow>
         <SettingsRow label={_('Save speech settings')}>
           <button type='button' className='btn btn-contrast btn-sm' onClick={save}>
@@ -139,6 +193,16 @@ export default function GeminiTTSSettings() {
         </p>
       )}
       <Tips title='Gemini TTS'>
+        <li>
+          {_(
+            'Lookahead prepares at most one recording near the end of playback. It never uses reserve requests.',
+          )}
+        </li>
+        <li>
+          {_(
+            'Batch length adapts to measured narration speed. Cached recordings keep their original text and can be replayed without new requests.',
+          )}
+        </li>
         <li>
           {_(
             'Your key stays on this device. Book text is sent directly to Google for speech generation.',

@@ -20,7 +20,14 @@ import { WebSpeechClient } from './WebSpeechClient';
 import { NativeTTSClient } from './NativeTTSClient';
 import { EdgeTTSClient } from './EdgeTTSClient';
 import { GeminiTTSClient } from './GeminiTTSClient';
-import type { GeminiSentence } from './gemini';
+import {
+  estimateGeminiSeconds,
+  getGeminiConfig,
+  getGeminiDurationScale,
+  getGeminiRegularLimit,
+  type GeminiSentence,
+} from './gemini';
+import { md5 } from 'js-md5';
 import { SectionTimeline, TimelineSentence } from './SectionTimeline';
 import { hydrateProvisionalDurations } from './ttsDuration';
 import { DownloadableSentence, SectionEnumerator, TTSDownloader } from './TTSDownloader';
@@ -704,6 +711,7 @@ export class TTSController extends EventTarget {
   // Position the text iterator and, for a chapter-only audiobook mapping,
   // carry the current page's proportional offset into the first audio chunk.
   startFromRange(range: Range): string | undefined {
+    if (this.ttsClient.getCapabilities().managesLookahead) this.ttsClient.setNextChunkPosition?.(0);
     const tts = this.#getTts();
     const ssml = tts?.from(range);
     if (
@@ -1444,6 +1452,7 @@ export class TTSController extends EventTarget {
   // Falls back to a full stop only at end of book, where there is nothing
   // left to pause on.
   async #stopAtChapterBoundary() {
+    if (this.ttsClient.getCapabilities().managesLookahead) await this.ttsClient.pause();
     if (await this.#initTTSForNextSection()) {
       this.state = 'forward-paused';
       this.#syncAudioKeepAlive();
@@ -1477,7 +1486,7 @@ export class TTSController extends EventTarget {
   async preloadNextSSML(count: number = 4) {
     // Gemini prepares the whole chapter in #speak. Paragraph lookahead can
     // race that preparation and spend quota on short fallback requests.
-    if (this.ttsClient === this.ttsGeminiClient) return;
+    if (this.ttsClient.getCapabilities().managesLookahead) return;
     const tts = this.#getTts();
     if (!tts) return;
 
@@ -1533,35 +1542,122 @@ export class TTSController extends EventTarget {
 
   async #prepareGeminiSection(signal: AbortSignal): Promise<void> {
     if (this.ttsClient !== this.ttsGeminiClient) return;
-    const id = `${this.bookKey}:${this.#ttsSectionIndex}:${this.ttsLang}:${this.ttsTargetLang}:${this.#skipInlineAnnotations}`;
+    const sectionId = (index: number) =>
+      `${this.bookKey?.split('-')[0]}:${index}:${this.ttsLang}:${this.ttsTargetLang}:${this.#skipInlineAnnotations}`;
+    const id = sectionId(this.#ttsSectionIndex);
     if (this.#geminiPreparedSection === id) return;
-    const section = this.view.book.sections?.[this.#ttsSectionIndex];
-    if (!section?.createDocument)
+    if (this.ttsGeminiClient.activateSection(id)) {
+      this.#geminiPreparedSection = id;
+      return;
+    }
+    const sections = this.view.book.sections;
+    if (!sections?.[this.#ttsSectionIndex]?.createDocument)
       throw new Error('This book section cannot be prepared for Gemini TTS.');
-    const doc = await this.#createSectionDoc(section);
-    const [{ TTS }, { textWalker }] = await Promise.all([
+    const config = {
+      ...getGeminiConfig(),
+      voice: this.ttsGeminiClient.getVoiceId().replace(/^gemini:/, ''),
+    };
+    const windowKey = (index: number) =>
+      `readest-gemini-window-${md5(`${sectionId(index)}:${config.batchMinutes}`)}`;
+    let start = this.#ttsSectionIndex;
+    let savedEnd = -1;
+    // Reopening any chapter in a prepared window rebuilds the same text and
+    // batch keys, including recordings that start in the preceding chapter.
+    try {
+      const saved = JSON.parse(localStorage.getItem(windowKey(start)) || '{}') as {
+        start?: number;
+        end?: number;
+      };
+      if (
+        Number.isInteger(saved.start) &&
+        Number.isInteger(saved.end) &&
+        saved.start! >= 0 &&
+        saved.start! <= start &&
+        saved.end! >= start &&
+        saved.end! < sections.length &&
+        saved.end! - saved.start! < 128
+      ) {
+        start = saved.start!;
+        savedEnd = saved.end!;
+      }
+    } catch {}
+    const [{ TTS, getSentences }, { textWalker }] = await Promise.all([
       import('foliate-js/tts.js'),
       import('foliate-js/text-walker.js'),
     ]);
-    // A fresh source enumerates full paragraphs without moving the live
-    // reading cursor. Preprocessing matches live speech, including translation.
-    const source = new TTS(doc, textWalker, createTTSNodeFilter(), () => {}, 'sentence');
-    const sentences: GeminiSentence[] = [];
-    let raw = source.start();
-    while (raw) {
+    const prepared: { id: string; sentences: GeminiSentence[] }[] = [];
+    let estimated = 0;
+    const scale = getGeminiDurationScale(config, this.ttsLang || 'en');
+    const target = config.batchMinutes * 60 * Math.min(8, getGeminiRegularLimit(config));
+    // Text lookahead only. Audio lookahead stays at one recording. Avoid
+    // translating unread chapters when translated speech is selected.
+    const maxSections = this.ttsTargetLang ? 1 : 128;
+    if (this.ttsTargetLang) {
+      start = this.#ttsSectionIndex;
+      savedEnd = start;
+    }
+    for (let index = start; index < Math.min(sections.length, start + maxSections); index++) {
       if (signal.aborted) return;
-      const processed = await this.#preprocessSSML(raw);
-      if (processed)
-        sentences.push(
-          ...parseSSMLMarks(processed, this.ttsLang || 'en').marks.map((mark) => ({
-            text: mark.text,
-            lang: mark.language,
-          })),
-        );
-      raw = source.next();
+      if (savedEnd >= 0 && index > savedEnd) break;
+      if (
+        savedEnd < 0 &&
+        index > this.#ttsSectionIndex &&
+        prepared.length > 1 &&
+        estimated * scale >= target
+      )
+        break;
+      const section = sections[index];
+      if (!section?.createDocument) break;
+      const sentences: GeminiSentence[] = [];
+      try {
+        const doc = await this.#createSectionDoc(section);
+        // Fresh iterators never move the visible chapter's text cursor.
+        const source = new TTS(doc, textWalker, createTTSNodeFilter(), () => {}, 'sentence');
+        const locations = new Map<string, string>();
+        for (const entry of getSentences(doc, textWalker, createTTSNodeFilter(), 'sentence')) {
+          try {
+            locations.set(
+              `${entry.blockIndex}:${entry.markName}`,
+              this.view.getCFI(index, entry.range),
+            );
+          } catch {}
+        }
+        let block = 0;
+        let raw = source.start();
+        while (raw) {
+          if (signal.aborted) return;
+          const processed = await this.#preprocessSSML(raw);
+          if (processed)
+            sentences.push(
+              ...parseSSMLMarks(processed, this.ttsLang || 'en').marks.map((mark) => ({
+                text: mark.text,
+                lang: mark.language,
+                cfi: locations.get(`${block}:${mark.name}`),
+              })),
+            );
+          raw = source.next();
+          block++;
+        }
+      } catch (error) {
+        if (index <= this.#ttsSectionIndex) throw error;
+        break; // A broken future chapter must not block the current one.
+      }
+      estimated += sentences.reduce(
+        (sum, sentence) => sum + estimateGeminiSeconds(sentence.text),
+        0,
+      );
+      prepared.push({ id: sectionId(index), sentences });
     }
     if (signal.aborted) return;
-    this.ttsGeminiClient.prepareSection(id, sentences);
+    const [first, ...following] = prepared;
+    if (!first) throw new Error('This book section cannot be prepared for Gemini TTS.');
+    this.ttsGeminiClient.prepareSection(first.id, first.sentences, following);
+    this.ttsGeminiClient.activateSection(id);
+    try {
+      const window = JSON.stringify({ start, end: start + prepared.length - 1 });
+      for (let index = start; index < start + prepared.length; index++)
+        localStorage.setItem(windowKey(index), window);
+    } catch {}
     this.#geminiPreparedSection = id;
   }
 
@@ -1626,7 +1722,8 @@ export class TTSController extends EventTarget {
             this.dispatchSpeakMark(marks[0]);
           }
           await this.#prepareGeminiSection(signal);
-          await this.preloadSSML(ssml, signal);
+          if (!this.ttsClient.getCapabilities().managesLookahead)
+            await this.preloadSSML(ssml, signal);
         }
         // Only the native client surfaces an offline engine failure as a
         // terminal 'error' code (Edge/Web throw, which the catch below handles).
@@ -1863,6 +1960,7 @@ export class TTSController extends EventTarget {
     const { sectionIndex, cfi } = this.#loopA!;
     if (sectionIndex !== this.#ttsSectionIndex) await this.#initTTSForSection(sectionIndex);
     const range = this.view.resolveCFI(cfi).anchor(this.#ttsDoc!);
+    if (this.ttsClient.getCapabilities().managesLookahead) this.ttsClient.setNextChunkPosition?.(0);
     await this.#handleNavigationWithSSML(this.#getTts()?.from(range), isPlaying);
     if (!isPlaying) this.reapplyCurrentHighlight();
   }
@@ -1950,6 +2048,7 @@ export class TTSController extends EventTarget {
     // While playing, this is a handover to the utterance about to be spoken
     // below; only a stopped session should actually be silenced here.
     await this.stop(isPlaying);
+    if (this.ttsClient.getCapabilities().managesLookahead) this.ttsClient.setNextChunkPosition?.(0);
     if (!isPlaying) this.state = 'backward-paused';
 
     const tts = this.#getTts();
@@ -1986,6 +2085,8 @@ export class TTSController extends EventTarget {
     // the auto-advance path, so for recorded narration it is what decides
     // whether every paragraph boundary gets a gap.
     await this.stop(isPlaying);
+    if (!isAutoAdvance && this.ttsClient.getCapabilities().managesLookahead)
+      this.ttsClient.setNextChunkPosition?.(0);
     if (!isPlaying) this.state = 'forward-paused';
 
     const tts = this.#getTts();
@@ -2406,6 +2507,8 @@ export class TTSController extends EventTarget {
       return;
     }
     console.error(e);
+    if (this.ttsClient.getCapabilities().managesLookahead)
+      void this.ttsClient.stop().catch(() => {});
     this.#terminate('error');
     this.state = 'stopped';
   }

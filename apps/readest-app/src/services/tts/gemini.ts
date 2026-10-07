@@ -1,7 +1,17 @@
 import { md5 } from 'js-md5';
+import { stubTranslation as _ } from '@/utils/misc';
 
 const CONFIG_KEY = 'readest-gemini-tts';
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
+export const GEMINI_BUDGET_MESSAGE = _(
+  'The local daily Gemini request budget has been reached. Cached audio still works.',
+);
+export const GEMINI_RESERVE_MESSAGE = _(
+  'The regular daily Gemini request budget has been reached. Enable one reserve request in Gemini TTS settings. Cached audio still works.',
+);
+export const GEMINI_RETRY_MESSAGE = _(
+  'Gemini speech generation failed. Check your key and quota in AI Studio, then allow a retry in Gemini TTS settings.',
+);
 export const GEMINI_VOICES = [
   'Algenib',
   'Charon',
@@ -59,6 +69,7 @@ export function setGeminiConfig(config: GeminiConfig): void {
 export interface GeminiSentence {
   text: string;
   lang: string;
+  cfi?: string;
 }
 export interface GeminiBatch {
   sentences: GeminiSentence[];
@@ -75,7 +86,11 @@ export function estimateGeminiSeconds(text: string): number {
   return Math.max(0.2, cjk / 4.5 + words / 2.5);
 }
 
-export function buildGeminiBatches(sentences: GeminiSentence[], minutes: number): GeminiBatch[] {
+export function buildGeminiBatches(
+  sentences: GeminiSentence[],
+  minutes: number,
+  durationScale = 1,
+): GeminiBatch[] {
   const batches: GeminiBatch[] = [];
   let batch: GeminiBatch = { sentences: [], estimatedSeconds: 0 };
   let chars = 0;
@@ -84,7 +99,8 @@ export function buildGeminiBatches(sentences: GeminiSentence[], minutes: number)
     const seconds = estimateGeminiSeconds(sentence.text);
     if (
       batch.sentences.length &&
-      (batch.estimatedSeconds + seconds > minutes * 60 || chars + sentence.text.length > 7000)
+      ((batch.estimatedSeconds + seconds) * durationScale > minutes * 60 ||
+        chars + sentence.text.length > 7000)
     ) {
       batches.push(batch);
       batch = { sentences: [], estimatedSeconds: 0 };
@@ -222,21 +238,79 @@ const pacificDate = () =>
   }).format(new Date());
 const usageKey = (config: GeminiConfig) =>
   `readest-gemini-usage-${md5(config.apiKey)}-${config.model}`;
-export function getGeminiUsage(config = getGeminiConfig()): number {
+export const GEMINI_USAGE_EVENT = 'readest-gemini-usage-changed';
+interface GeminiUsage {
+  day: string;
+  used: number;
+  reserveAllowed: number;
+}
+function readUsage(config: GeminiConfig): GeminiUsage {
   try {
-    const value = JSON.parse(localStorage.getItem(usageKey(config)) || '{}') as {
-      day?: string;
-      used?: number;
-    };
-    return value.day === pacificDate() ? value.used || 0 : 0;
-  } catch {
-    return 0;
-  }
+    const value = JSON.parse(
+      localStorage.getItem(usageKey(config)) || '{}',
+    ) as Partial<GeminiUsage>;
+    if (value.day === pacificDate())
+      return { day: value.day, used: value.used || 0, reserveAllowed: value.reserveAllowed || 0 };
+  } catch {}
+  return { day: pacificDate(), used: 0, reserveAllowed: 0 };
+}
+function writeUsage(config: GeminiConfig, usage: GeminiUsage): void {
+  localStorage.setItem(usageKey(config), JSON.stringify(usage));
+  window.dispatchEvent(new Event(GEMINI_USAGE_EVENT));
+}
+export function getGeminiUsage(config = getGeminiConfig()): number {
+  return readUsage(config).used;
+}
+export const getGeminiRegularLimit = (config = getGeminiConfig()) =>
+  Math.max(1, config.dailyLimit - 2);
+export function getGeminiReserveAvailable(config = getGeminiConfig()): number {
+  const usage = readUsage(config);
+  return Math.max(0, config.dailyLimit - usage.used - usage.reserveAllowed);
+}
+export function grantGeminiReserveRequest(config = getGeminiConfig()): boolean {
+  const usage = readUsage(config);
+  if (
+    usage.used < getGeminiRegularLimit(config) ||
+    usage.used + usage.reserveAllowed >= config.dailyLimit
+  )
+    return false;
+  usage.reserveAllowed++;
+  writeUsage(config, usage);
+  return true;
 }
 
-const STYLE = 'Read naturally at a normal audiobook pace. Use the language of the supplied text.';
+const durationKey = (config: GeminiConfig, lang: string) =>
+  `readest-gemini-duration-${md5(JSON.stringify([config.model, config.voice, lang]))}`;
+export function getGeminiDurationScale(config: GeminiConfig, lang: string): number {
+  const value = Number(localStorage.getItem(durationKey(config, lang))) || 1;
+  return Math.min(2.5, Math.max(0.5, value));
+}
+export function recordGeminiDurationScale(
+  config: GeminiConfig,
+  lang: string,
+  actual: number,
+  estimated: number,
+): void {
+  // Tiny chapter headings are dominated by pauses and cannot calibrate pace.
+  if (actual <= 0 || estimated < 60) return;
+  const key = durationKey(config, lang);
+  const previous = localStorage.getItem(key);
+  const observed = Math.min(2.5, Math.max(0.5, actual / estimated));
+  const scale = previous ? getGeminiDurationScale(config, lang) * 0.7 + observed * 0.3 : observed;
+  localStorage.setItem(key, String(scale));
+}
+
+const LEGACY_STYLE =
+  'Read naturally at a normal audiobook pace. Use the language of the supplied text.';
+const STYLE = `${LEGACY_STYLE} Read the supplied text exactly once, in order. Do not repeat, paraphrase, restart sentences, or add commentary.`;
+interface GeminiGenerationOptions {
+  preload?: boolean;
+  signal?: AbortSignal;
+  beforeRequest?: () => Promise<void>;
+}
 export class GeminiSpeechService {
   #pending = new Map<string, Promise<GeminiAudio>>();
+  #failed = new Set<string>();
   #memory = new Map<string, GeminiAudio>();
   #queue: Promise<unknown> = Promise.resolve();
   #starts: number[] = [];
@@ -247,81 +321,141 @@ export class GeminiSpeechService {
       : new GeminiAudioCache(),
   ) {}
 
-  generate(text: string, config: GeminiConfig): Promise<GeminiAudio> {
+  async getCached(text: string, config: GeminiConfig): Promise<GeminiAudio | null> {
     const key = md5(JSON.stringify([config.model, config.voice, STYLE, text]));
-    const pendingKey = `${key}:${md5(config.apiKey)}:${pacificDate()}:${config.dailyLimit}`;
-    const memory = this.#memory.get(key);
+    const legacyKey = md5(JSON.stringify([config.model, config.voice, LEGACY_STYLE, text]));
+    const cached =
+      this.#memory.get(key) ||
+      this.#memory.get(legacyKey) ||
+      (await this.cache?.get(key).catch(() => null)) ||
+      (await this.cache?.get(legacyKey).catch(() => null));
+    if (cached) this.#remember(key, cached);
+    return cached || null;
+  }
+
+  generate(
+    text: string,
+    config: GeminiConfig,
+    options: GeminiGenerationOptions = {},
+  ): Promise<GeminiAudio> {
+    const key = md5(JSON.stringify([config.model, config.voice, STYLE, text]));
+    const legacyKey = md5(JSON.stringify([config.model, config.voice, LEGACY_STYLE, text]));
+    const usage = readUsage(config);
+    const pendingKey = `${key}:${md5(config.apiKey)}:${usage.day}:${config.dailyLimit}:${usage.reserveAllowed}`;
+    const memory = this.#memory.get(key) || this.#memory.get(legacyKey);
     if (memory) return Promise.resolve(memory);
     const pending = this.#pending.get(pendingKey);
     if (pending) return pending;
-    const promise = this.#queue
-      .catch(() => {})
-      .then(async () => {
-        const cached = await this.cache?.get(key).catch(() => null);
-        if (cached) {
-          this.#remember(key, cached);
-          return cached;
-        }
-        if (!config.apiKey) throw new Error('Set your Gemini API key in Settings → TTS first.');
-        let used = getGeminiUsage(config);
-        if (used >= config.dailyLimit)
-          throw new Error(
-            'The local daily Gemini request budget has been reached. Cached audio still works.',
-          );
-        this.#starts = this.#starts.filter((t) => Date.now() - t < 60000);
-        if (this.#starts.length >= 3) {
-          await new Promise((resolve) =>
-            setTimeout(resolve, 60010 - (Date.now() - this.#starts[0]!)),
-          );
+    let requestSent = false;
+    const promise = this.getCached(text, config).then((cached) => {
+      if (cached) return cached;
+      const queued = this.#queue
+        .catch(() => {})
+        .then(async () => {
+          const cached = await this.getCached(text, config);
+          if (cached) {
+            this.#remember(key, cached);
+            return cached;
+          }
+          if (!config.apiKey) throw new Error('Set your Gemini API key in Settings → TTS first.');
+          const checkBudget = () => {
+            if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+            const current = readUsage(config);
+            const regular = getGeminiRegularLimit(config);
+            if (current.used >= config.dailyLimit) throw new Error(GEMINI_BUDGET_MESSAGE);
+            if (options.preload && current.used >= regular - 1)
+              throw new Error(
+                'The Gemini lookahead budget is exhausted. The last regular request is kept for playback.',
+              );
+            if (current.used >= regular && !current.reserveAllowed)
+              throw new Error(GEMINI_RESERVE_MESSAGE);
+            return current;
+          };
+          await options.beforeRequest?.();
+          checkBudget();
           this.#starts = this.#starts.filter((t) => Date.now() - t < 60000);
-        }
-        used = getGeminiUsage(config);
-        if (used >= config.dailyLimit)
-          throw new Error('The local daily Gemini request budget has been reached.');
-        localStorage.setItem(
-          usageKey(config),
-          JSON.stringify({ day: pacificDate(), used: used + 1 }),
-        );
-        this.#starts.push(Date.now());
-        const response = await this.fetcher(ENDPOINT, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': config.apiKey },
-          body: JSON.stringify({
-            model: config.model,
-            input: [
-              {
-                type: 'user_input',
-                content: [
-                  { type: 'text', text, annotations: [{ type: 'speech_metadata', style: STYLE }] },
-                ],
-              },
-            ],
-            response_format: { type: 'audio' },
-            generation_config: { speech_config: [{ voice: config.voice }] },
-          }),
-          signal: AbortSignal.timeout(15 * 60 * 1000),
+          if (this.#starts.length >= 3) {
+            await new Promise<void>((resolve, reject) => {
+              const cleanup = () => {
+                clearTimeout(timer);
+                options.signal?.removeEventListener('abort', aborted);
+              };
+              const done = () => {
+                cleanup();
+                resolve();
+              };
+              const aborted = () => {
+                cleanup();
+                reject(new DOMException('Aborted', 'AbortError'));
+              };
+              const timer = setTimeout(done, 60010 - (Date.now() - this.#starts[0]!));
+              options.signal?.addEventListener('abort', aborted, { once: true });
+              if (options.signal?.aborted) aborted();
+            });
+            this.#starts = this.#starts.filter((t) => Date.now() - t < 60000);
+          }
+          await options.beforeRequest?.();
+          const current = checkBudget();
+          if (current.used >= getGeminiRegularLimit(config)) current.reserveAllowed--;
+          current.used++;
+          writeUsage(config, current);
+          requestSent = true;
+          this.#starts.push(Date.now());
+          const response = await this.fetcher(ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': config.apiKey },
+            body: JSON.stringify({
+              model: config.model,
+              input: [
+                {
+                  type: 'user_input',
+                  content: [
+                    {
+                      type: 'text',
+                      text,
+                      annotations: [{ type: 'speech_metadata', style: STYLE }],
+                    },
+                  ],
+                },
+              ],
+              response_format: { type: 'audio' },
+              generation_config: { speech_config: [{ voice: config.voice }] },
+            }),
+            signal: AbortSignal.timeout(15 * 60 * 1000),
+          });
+          if (!response.ok) {
+            const hint =
+              response.status === 429
+                ? 'Quota or rate limit reached. Wait for the reset or check AI Studio.'
+                : response.status === 400 || response.status === 401 || response.status === 403
+                  ? 'Check your API key, model access and region in AI Studio.'
+                  : 'Speech generation failed. Try again later.';
+            throw new Error(`Gemini TTS (${response.status}): ${hint}`);
+          }
+          const audio = decodeGeminiAudio(await response.json());
+          await this.cache?.put(key, audio).catch(() => {});
+          this.#remember(key, audio);
+          return audio;
         });
-        if (!response.ok) {
-          const hint =
-            response.status === 429
-              ? 'Quota or rate limit reached. Wait for the reset or check AI Studio.'
-              : response.status === 400 || response.status === 401 || response.status === 403
-                ? 'Check your API key, model access and region in AI Studio.'
-                : 'Speech generation failed. Try again later.';
-          throw new Error(`Gemini TTS (${response.status}): ${hint}`);
-        }
-        const audio = decodeGeminiAudio(await response.json());
-        await this.cache?.put(key, audio).catch(() => {});
-        this.#remember(key, audio);
-        return audio;
-      });
-    this.#queue = promise;
+      this.#queue = queued;
+      return queued;
+    });
     this.#pending.set(pendingKey, promise);
     // Retain failures for this page session: concurrent playback/preload must
     // not turn a single 429 into several billable retries.
     void promise.then(
       () => this.#pending.delete(pendingKey),
-      () => {},
+      (error) => {
+        if (
+          (!requestSent &&
+            (options.signal?.aborted ||
+              (error instanceof DOMException && error.name === 'AbortError') ||
+              (error instanceof Error && error.name === 'AbortError'))) ||
+          String(error).includes('budget')
+        )
+          this.#pending.delete(pendingKey);
+        else this.#failed.add(pendingKey);
+      },
     );
     return promise;
   }
@@ -331,8 +465,11 @@ export class GeminiSpeechService {
   }
   async clearCache(): Promise<void> {
     this.#memory.clear();
-    this.#pending.clear();
     await this.cache?.clear();
+  }
+  retryFailedRequests(): void {
+    for (const key of this.#failed) this.#pending.delete(key);
+    this.#failed.clear();
   }
 }
 export const geminiSpeech = new GeminiSpeechService();

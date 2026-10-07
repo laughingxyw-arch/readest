@@ -5,6 +5,11 @@ import {
   getGeminiConfig,
   setGeminiConfig,
   GeminiSpeechService,
+  GeminiAudioCache,
+  getGeminiUsage,
+  grantGeminiReserveRequest,
+  getGeminiDurationScale,
+  recordGeminiDurationScale,
 } from '@/services/tts/gemini';
 
 const wav = (seconds = 1) => {
@@ -34,6 +39,121 @@ beforeEach(() => {
 });
 
 describe('Gemini long-form TTS', () => {
+  it('plays a legacy cached recording immediately while another recording is still generating', async () => {
+    const { md5 } = await import('js-md5');
+    const config = { ...getGeminiConfig(), apiKey: 'legacy-key' };
+    const text = 'Previously generated text';
+    const key = md5(
+      JSON.stringify([
+        config.model,
+        config.voice,
+        'Read naturally at a normal audiobook pace. Use the language of the supplied text.',
+        text,
+      ]),
+    );
+    const cached = { blob: new Blob(['cached']), duration: 480 };
+    const cache = {
+      get: vi.fn(async (lookup: string) => (lookup === key ? cached : null)),
+      put: vi.fn().mockResolvedValue(undefined),
+      clear: vi.fn(),
+    } as unknown as GeminiAudioCache;
+    let finish!: (response: Response) => void;
+    const fetcher = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const service = new GeminiSpeechService(fetcher, cache);
+    const pending = service.generate('New recording', config);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+    await expect(service.generate(text, config)).resolves.toBe(cached);
+    expect(getGeminiUsage(config)).toBe(1);
+    const encoded = btoa(Array.from(wav(), (n) => String.fromCharCode(n)).join(''));
+    finish(
+      new Response(JSON.stringify({ steps: [{ content: [{ type: 'audio', data: encoded }] }] })),
+    );
+    await pending;
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it('keeps two requests reserved until the reader explicitly releases one', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-10-07T12:00:00Z'));
+      const encoded = btoa(Array.from(wav(), (n) => String.fromCharCode(n)).join(''));
+      const fetcher = vi
+        .fn()
+        .mockImplementation(
+          async () =>
+            new Response(
+              JSON.stringify({ steps: [{ content: [{ type: 'audio', data: encoded }] }] }),
+            ),
+        );
+      const service = new GeminiSpeechService(fetcher, null);
+      const config = { ...getGeminiConfig(), apiKey: 'quota-key' };
+      for (let i = 0; i < 8; i++) {
+        await service.generate(`Recording ${i}`, config);
+        vi.setSystemTime(Date.now() + 61000);
+      }
+      await expect(service.generate('Reserve recording', config)).rejects.toThrow(/reserve/);
+      expect(getGeminiUsage(config)).toBe(8);
+      expect(grantGeminiReserveRequest(config)).toBe(true);
+      await expect(service.generate('Reserve recording', config)).resolves.toHaveProperty(
+        'duration',
+        1,
+      );
+      await expect(service.generate('Last reserve recording', config)).rejects.toThrow(/reserve/);
+      expect(grantGeminiReserveRequest(config)).toBe(true);
+      vi.setSystemTime(Date.now() + 61000);
+      await service.generate('Last reserve recording', config);
+      expect(grantGeminiReserveRequest(config)).toBe(false);
+      expect(getGeminiUsage(config)).toBe(10);
+      expect(fetcher).toHaveBeenCalledTimes(10);
+      await expect(service.generate('Last reserve recording', config)).resolves.toHaveProperty(
+        'duration',
+        1,
+      );
+      expect(fetcher).toHaveBeenCalledTimes(10);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let lookahead use the last regular request or a reserve request', async () => {
+    const encoded = btoa(Array.from(wav(), (n) => String.fromCharCode(n)).join(''));
+    const fetcher = vi
+      .fn()
+      .mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({ steps: [{ content: [{ type: 'audio', data: encoded }] }] }),
+          ),
+      );
+    const service = new GeminiSpeechService(fetcher, null);
+    const config = { ...getGeminiConfig(), apiKey: 'preload-key', dailyLimit: 4 };
+    await service.generate('First', config);
+    await expect(service.generate('Next', config, { preload: true })).rejects.toThrow(/budget/);
+    await service.generate('Next', config);
+    grantGeminiReserveRequest(config);
+    await expect(service.generate('Reserve', config, { preload: true })).rejects.toThrow(/budget/);
+    expect(getGeminiUsage(config)).toBe(2);
+    await service.generate('Reserve', config);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it('learns actual narration duration independently for each voice and language', () => {
+    const config = getGeminiConfig();
+    recordGeminiDurationScale(config, 'zh', 400, 200);
+    expect(getGeminiDurationScale(config, 'zh')).toBe(2);
+    expect(getGeminiDurationScale({ ...config, voice: 'Charon' }, 'zh')).toBe(1);
+    expect(getGeminiDurationScale(config, 'en')).toBe(1);
+    const sentences = Array.from({ length: 50 }, () => ({ text: '山'.repeat(90), lang: 'zh' }));
+    const batches = buildGeminiBatches(sentences, 8, getGeminiDurationScale(config, 'zh'));
+    expect(batches.flatMap((batch) => batch.sentences)).toEqual(sentences);
+    expect(batches[0]!.sentences).toHaveLength(12);
+  });
+
   it('groups Chinese sentences into long requests without losing text', () => {
     const sentences = Array.from({ length: 100 }, (_, i) => ({
       text: `${i}。${'山'.repeat(60)}`,
@@ -119,6 +239,63 @@ describe('Gemini long-form TTS', () => {
     await expect(service.generate('测试', getGeminiConfig())).rejects.toThrow(/429/);
     await expect(service.generate('测试', getGeminiConfig())).rejects.toThrow(/429/);
     expect(fetcher).toHaveBeenCalledTimes(1);
+    service.retryFailedRequests();
+    await expect(service.generate('测试', getGeminiConfig())).rejects.toThrow(/429/);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not send a queued request after its reading session is abandoned', async () => {
+    let finish!: (response: Response) => void;
+    const encoded = btoa(Array.from(wav(), (n) => String.fromCharCode(n)).join(''));
+    const response = () =>
+      new Response(JSON.stringify({ steps: [{ content: [{ type: 'audio', data: encoded }] }] }));
+    const fetcher = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockImplementation(async () => response());
+    const service = new GeminiSpeechService(fetcher, null);
+    const config = { ...getGeminiConfig(), apiKey: 'queued-key' };
+    const first = service.generate('First', config);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const controller = new AbortController();
+    const next = service.generate('Next', config, { preload: true, signal: controller.signal });
+    const rejected = expect(next).rejects.toThrow(/Aborted/);
+    controller.abort();
+    finish(response());
+    await first;
+    await rejected;
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(getGeminiUsage(config)).toBe(1);
+    await service.generate('Next', config);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps in-flight deduplication when cached recordings are cleared', async () => {
+    let finish!: (response: Response) => void;
+    const encoded = btoa(Array.from(wav(), (n) => String.fromCharCode(n)).join(''));
+    const fetcher = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const service = new GeminiSpeechService(fetcher, null);
+    const config = { ...getGeminiConfig(), apiKey: 'clear-key' };
+    const first = service.generate('Same recording', config);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await service.clearCache();
+    const second = service.generate('Same recording', config);
+    finish(
+      new Response(JSON.stringify({ steps: [{ content: [{ type: 'audio', data: encoded }] }] })),
+    );
+    await Promise.all([first, second]);
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(getGeminiUsage(config)).toBe(1);
   });
   it('allows a corrected key after an authentication failure', async () => {
     const encoded = btoa(Array.from(wav(), (n) => String.fromCharCode(n)).join(''));
