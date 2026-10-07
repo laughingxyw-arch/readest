@@ -1,14 +1,14 @@
-name: Publish Gemini TTS APK download
+name: Publish MiMo TTS APK download
 
 on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: Successful Build Gemini TTS APK run ID
+        description: Successful Build MiMo TTS APK run ID
         required: true
         type: string
   workflow_run:
-    workflows: ['Build Gemini TTS APK']
+    workflows: ['Build MiMo TTS APK']
     types: [completed]
     branches: [main]
 
@@ -17,7 +17,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: publish-gemini-apk
+  group: publish-mimo-apk
   cancel-in-progress: false
 
 jobs:
@@ -38,31 +38,31 @@ jobs:
           import json, os
           run = json.load(open('source-run.json'))
           assert run['repository']['full_name'] == os.environ['GITHUB_REPOSITORY']
-          assert run['name'] == 'Build Gemini TTS APK'
+          assert run['name'] == 'Build MiMo TTS APK'
           assert run['status'] == 'completed' and run['conclusion'] == 'success'
           with open(os.environ['GITHUB_ENV'], 'a') as env:
               env.write('APK_COMMIT=' + run['head_sha'] + '\n')
           PY
-          gh run download "$APK_RUN_ID" --repo "$GITHUB_REPOSITORY" --name readest-gemini-tts-arm64 --dir apk
+          gh run download "$APK_RUN_ID" --repo "$GITHUB_REPOSITORY" --name readest-mimo-tts-arm64 --dir apk
           cd apk
           sha256sum --check SHA256SUMS
-          test -s Readest-Gemini-TTS-arm64.apk
+          test -s Readest-MiMo-TTS-arm64.apk
 
       - name: Publish verified APK as a prerelease
         run: |
           set -euo pipefail
-          tag="gemini-tts-optimized-${APK_COMMIT:0:7}"
+          tag="mimo-tts-optimized-${APK_COMMIT:0:7}"
           cat > release-notes.md <<'NOTES'
-          Gemini TTS optimized ARM64 test APK for Android 8.0 or later.
-          Release 构建，已移除调试符号，保留阅读和 Gemini 朗读功能。
+          MiMo TTS optimized ARM64 test APK for Android 8.0 or later.
+          Release 构建，已移除调试符号，保留阅读和 MiMo 朗读功能。
 
-          安装后在“设置 → 朗读 → Gemini TTS”输入自己的 API Key。
+          安装后在“设置 → 朗读 → MiMo TTS”输入自己的 API Key。
           使用固定的公开测试签名，与官方版及先前的临时签名测试版不同。提示签名不一致时，请先备份书籍、批注和设置，再卸载旧版安装。
           小米 15 的 ARM64 架构满足要求，但尚未进行小米 15 真机测试。
           NOTES
           printf '\nSource commit: %s\nBuild run: %s\n' "$APK_COMMIT" "$APK_RUN_ID" >> release-notes.md
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$APK_COMMIT" --draft --prerelease --latest=false --title 'Readest Gemini TTS — optimized ARM64 test APK' --notes-file release-notes.md
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$APK_COMMIT" --draft --prerelease --latest=false --title 'Readest MiMo TTS — optimized ARM64 test APK' --notes-file release-notes.md
           fi
-          gh release upload "$tag" apk/Readest-Gemini-TTS-arm64.apk apk/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$tag" apk/Readest-MiMo-TTS-arm64.apk apk/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false --notes-file release-notes.md

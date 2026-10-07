@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { GeminiTTSClient } from '@/services/tts/GeminiTTSClient';
+import { MiMoTTSClient } from '@/services/tts/MiMoTTSClient';
 import type { TTSController } from '@/services/tts/TTSController';
-import { geminiSpeech, getGeminiConfig, setGeminiConfig } from '@/services/tts/gemini';
+import { mimoSpeech, getMiMoConfig, setMiMoConfig } from '@/services/tts/mimo';
 
 class MockAudio extends EventTarget {
   static instances: MockAudio[] = [];
@@ -37,7 +37,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal('Audio', MockAudio);
   vi.stubGlobal('URL', { createObjectURL: () => 'blob:test', revokeObjectURL: vi.fn() });
-  setGeminiConfig({ ...getGeminiConfig(), enabled: true, apiKey: 'test-key' });
+  setMiMoConfig({ ...getMiMoConfig(), enabled: true, apiKey: 'test-key' });
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -45,39 +45,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('Gemini recording playback', () => {
-  it('reuses an old per-chapter recording after upgrading to cross-chapter batches', async () => {
-    const cached = { blob: new Blob(['old']), duration: 10 };
-    vi.spyOn(geminiSpeech, 'getCached').mockImplementation(async (text) =>
-      text === '第一句话。' ? cached : null,
-    );
-    const generate = vi.spyOn(geminiSpeech, 'generate');
-    const client = new GeminiTTSClient();
-    await client.init();
-    client.prepareSection(
-      'chapter-1',
-      [{ text: '第一句话。', lang: 'zh' }],
-      [{ id: 'chapter-2', sentences: [{ text: '第二句话。', lang: 'zh' }] }],
-    );
-    const playback = client
-      .speak('<speak><mark name="0"/>第一句话。</speak>', new AbortController().signal)
-      [Symbol.asyncIterator]();
-    await playback.next();
-    expect(generate).not.toHaveBeenCalled();
-    expect(MockAudio.instances).toHaveLength(1);
-    await client.shutdown();
-    await playback.return?.();
-  });
-
+describe('MiMo recording playback', () => {
   it('uses the book position to distinguish identical sentences when starting from a selection', async () => {
     const cached = { blob: new Blob(['test']), duration: 10 };
-    vi.spyOn(geminiSpeech, 'getCached').mockResolvedValue(cached);
-    const generate = vi.spyOn(geminiSpeech, 'generate');
+    vi.spyOn(mimoSpeech, 'getCached').mockResolvedValue(cached);
+    const generate = vi.spyOn(mimoSpeech, 'generate');
     const controller = {
       getSpokenSentence: () => ({ cfi: 'second' }),
       dispatchSpeakMark: vi.fn(),
     } as unknown as TTSController;
-    const client = new GeminiTTSClient(controller);
+    const client = new MiMoTTSClient(controller);
     await client.init();
     client.prepareSection('chapter-1', [
       { text: '相同的句子。', lang: 'zh', cfi: 'first' },
@@ -95,12 +72,12 @@ describe('Gemini recording playback', () => {
 
   it('waits for Resume before sending a request that has not started yet', async () => {
     const sent = vi.fn();
-    vi.spyOn(geminiSpeech, 'generate').mockImplementation(async (_text, _config, options) => {
+    vi.spyOn(mimoSpeech, 'generate').mockImplementation(async (_text, _config, options) => {
       await options?.beforeRequest?.();
       sent();
       return { blob: new Blob(['test']), duration: 10 };
     });
-    const client = new GeminiTTSClient();
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-1', [{ text: '测试。', lang: 'zh' }]);
     await client.pause();
@@ -120,9 +97,9 @@ describe('Gemini recording playback', () => {
 
   it('keeps the same recording rolling across short chapter boundaries', async () => {
     const generate = vi
-      .spyOn(geminiSpeech, 'generate')
+      .spyOn(mimoSpeech, 'generate')
       .mockResolvedValue({ blob: new Blob(['test']), duration: 10 });
-    const client = new GeminiTTSClient();
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection(
       'chapter-1',
@@ -154,11 +131,11 @@ describe('Gemini recording playback', () => {
   });
 
   it('does not restart completed audio while a throttled text cursor catches up', async () => {
-    vi.spyOn(geminiSpeech, 'generate').mockResolvedValue({
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({
       blob: new Blob(['test']),
       duration: 10,
     });
-    const client = new GeminiTTSClient();
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-1', [
       { text: '第一句话。', lang: 'zh' },
@@ -185,11 +162,11 @@ describe('Gemini recording playback', () => {
   });
 
   it('does not rewind or pause the recording when paragraph handover is delayed', async () => {
-    vi.spyOn(geminiSpeech, 'generate').mockResolvedValue({
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({
       blob: new Blob(['test']),
       duration: 10,
     });
-    const client = new GeminiTTSClient();
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-1', [
       { text: '第一句话。', lang: 'zh' },
@@ -219,9 +196,9 @@ describe('Gemini recording playback', () => {
 
   it('only seeks back to an estimated sentence boundary after an explicit navigation request', async () => {
     const generate = vi
-      .spyOn(geminiSpeech, 'generate')
+      .spyOn(mimoSpeech, 'generate')
       .mockResolvedValue({ blob: new Blob(['test']), duration: 10 });
-    const client = new GeminiTTSClient();
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-1', [{ text: '测试。', lang: 'zh' }]);
     const signal = new AbortController().signal;
@@ -244,12 +221,12 @@ describe('Gemini recording playback', () => {
   });
 
   it('reuses an existing full recording when continuous reading starts at a later sentence', async () => {
-    vi.spyOn(geminiSpeech, 'getCached').mockResolvedValue({
+    vi.spyOn(mimoSpeech, 'getCached').mockResolvedValue({
       blob: new Blob(['test']),
       duration: 10,
     });
-    const generate = vi.spyOn(geminiSpeech, 'generate');
-    const client = new GeminiTTSClient();
+    const generate = vi.spyOn(mimoSpeech, 'generate');
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-1', [
       { text: '第一句话。', lang: 'zh' },
@@ -266,28 +243,29 @@ describe('Gemini recording playback', () => {
   });
 
   it('starts an uncached long batch at the chosen sentence and preserves its text after reopening', async () => {
-    vi.spyOn(geminiSpeech, 'getCached').mockResolvedValue(null);
+    vi.spyOn(mimoSpeech, 'getCached').mockResolvedValue(null);
     const generate = vi
-      .spyOn(geminiSpeech, 'generate')
+      .spyOn(mimoSpeech, 'generate')
       .mockResolvedValue({ blob: new Blob(['test']), duration: 600 });
     const sentences = Array.from({ length: 80 }, (_, i) => ({
       text: `${i}：${'山'.repeat(90)}。`,
       lang: 'zh',
     }));
     const ssml = `<speak><mark name="start"/>${sentences[10]!.text}</speak>`;
-    const client = new GeminiTTSClient();
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-long', sentences);
     const playback = client.speak(ssml, new AbortController().signal)[Symbol.asyncIterator]();
     await playback.next();
     const generatedText = generate.mock.calls[0]![0];
     expect(generatedText.startsWith(sentences[10]!.text)).toBe(true);
-    expect(generatedText.split('\n').length).toBeGreaterThan(20);
+    expect(generatedText.split('\n').length).toBeGreaterThan(0);
+    expect(generatedText.split('\n').length).toBeLessThanOrEqual(2);
     expect(MockAudio.instances[0]!.currentTime).toBe(0);
     await client.shutdown();
     await playback.return?.();
     // Learning a slower narration pace must not repartition cached audio.
-    const reopened = new GeminiTTSClient();
+    const reopened = new MiMoTTSClient();
     await reopened.init();
     reopened.prepareSection('chapter-long', sentences);
     const replay = reopened.speak(ssml, new AbortController().signal)[Symbol.asyncIterator]();
@@ -299,13 +277,13 @@ describe('Gemini recording playback', () => {
 
   it('only prepares one next batch near the audible end and does not load it into the player', async () => {
     const generate = vi
-      .spyOn(geminiSpeech, 'generate')
-      .mockResolvedValue({ blob: new Blob(['test']), duration: 480 });
+      .spyOn(mimoSpeech, 'generate')
+      .mockResolvedValue({ blob: new Blob(['test']), duration: 30 });
     const sentences = Array.from({ length: 80 }, (_, i) => ({
       text: `${i}：${'山'.repeat(90)}。`,
       lang: 'zh',
     }));
-    const client = new GeminiTTSClient();
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-lookahead', sentences);
     const playback = client
@@ -316,38 +294,40 @@ describe('Gemini recording playback', () => {
     await vi.advanceTimersByTimeAsync(60);
     expect(generate).toHaveBeenCalledTimes(1);
     const player = MockAudio.instances[0]!;
-    player.currentTime = 430;
+    player.currentTime = 11;
     await vi.advanceTimersByTimeAsync(60);
-    await end;
     expect(generate).toHaveBeenCalledTimes(2);
     expect(generate.mock.calls[1]![2]).toMatchObject({ preload: true });
     expect(MockAudio.instances).toHaveLength(1);
-    expect(player.currentTime).toBe(430);
+    expect(player.currentTime).toBe(11);
+    player.currentTime = 30;
+    await vi.advanceTimersByTimeAsync(60);
+    await end;
     await client.shutdown();
   });
 
   it('does not request a short fallback when prepared chapter text cannot be matched', async () => {
-    const generate = vi.spyOn(geminiSpeech, 'generate');
-    const client = new GeminiTTSClient();
+    const generate = vi.spyOn(mimoSpeech, 'generate');
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-1', [{ text: '原文。', lang: 'zh' }]);
     const playback = client
       .speak('<speak><mark name="a"/>不匹配。</speak>', new AbortController().signal)
       [Symbol.asyncIterator]();
-    await expect(playback.next()).rejects.toThrow(/No Gemini request/);
+    await expect(playback.next()).rejects.toThrow(/No MiMo request/);
     expect(generate).not.toHaveBeenCalled();
     await client.shutdown();
   });
 
   it('keeps playback paused when generation finishes after Pause is pressed', async () => {
     let finish!: (audio: { blob: Blob; duration: number }) => void;
-    vi.spyOn(geminiSpeech, 'generate').mockImplementation(
+    vi.spyOn(mimoSpeech, 'generate').mockImplementation(
       () =>
         new Promise((resolve) => {
           finish = resolve;
         }),
     );
-    const client = new GeminiTTSClient();
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-1', [{ text: '测试。', lang: 'zh' }]);
     const playback = client
@@ -366,11 +346,11 @@ describe('Gemini recording playback', () => {
   });
 
   it('keeps one long recording across paragraphs and supports pause and rate changes', async () => {
-    const generate = vi.spyOn(geminiSpeech, 'generate').mockResolvedValue({
+    const generate = vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({
       blob: new Blob(['test']),
       duration: 10,
     });
-    const client = new GeminiTTSClient();
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-1', [
       { text: '第一句话。', lang: 'zh' },
@@ -383,7 +363,7 @@ describe('Gemini recording playback', () => {
     expect((await first.next()).value?.code).toBe('boundary');
     expect(generate).toHaveBeenCalledWith(
       '第一句话。\n第二句话。',
-      expect.objectContaining({ voice: 'Algenib' }),
+      expect.objectContaining({ voice: '茉莉' }),
       expect.anything(),
     );
     const player = MockAudio.instances[0]!;
@@ -411,11 +391,11 @@ describe('Gemini recording playback', () => {
   });
 
   it('preloads without starting playback and stops an active recording', async () => {
-    vi.spyOn(geminiSpeech, 'generate').mockResolvedValue({
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({
       blob: new Blob(['test']),
       duration: 10,
     });
-    const client = new GeminiTTSClient();
+    const client = new MiMoTTSClient();
     await client.init();
     client.prepareSection('chapter-1', [{ text: '测试。', lang: 'zh' }]);
     const ssml = '<speak><mark name="a"/>测试。</speak>';

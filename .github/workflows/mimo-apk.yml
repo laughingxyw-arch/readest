@@ -1,11 +1,11 @@
-name: Build Gemini TTS APK
+name: Build MiMo TTS APK
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/gemini-apk.yml'
+      - '.github/workflows/mimo-apk.yml'
       - 'apps/readest-app/**'
       - 'packages/**'
       - 'Cargo.toml'
@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: gemini-apk-${{ github.ref }}
+  group: mimo-apk-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -55,18 +55,18 @@ jobs:
           targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
-          key: gemini-apk-arm64-release
+          key: gemini-apk-arm64-release # Reuse the existing ARM64 release cache.
 
       - name: Install frontend dependencies
         run: |
           pnpm install --frozen-lockfile --prefer-offline
           pnpm --filter @readest/readest-app setup-vendors
 
-      - name: Check Gemini TTS
+      - name: Check MiMo TTS
         working-directory: apps/readest-app
         run: |
           pnpm lint
-          pnpm test --run --maxWorkers=2 src/__tests__/services/gemini-tts.test.ts src/__tests__/services/gemini-playback.test.ts src/__tests__/services/gemini-controller.test.ts src/__tests__/components/settings/GeminiTTSSettings.test.tsx src/__tests__/services/tts-controller.test.ts src/__tests__/components/annotator/AnnotatorShortcuts.test.tsx src/__tests__/hooks/useTTSControl.test.tsx
+          pnpm test --run --maxWorkers=2 src/__tests__/services/mimo-tts.test.ts src/__tests__/services/mimo-playback.test.ts src/__tests__/services/mimo-controller.test.ts src/__tests__/components/settings/MiMoTTSSettings.test.tsx src/__tests__/services/tts-controller.test.ts src/__tests__/components/annotator/AnnotatorShortcuts.test.tsx src/__tests__/hooks/useTTSControl.test.tsx
 
       - name: Build installable ARM64 test APK
         working-directory: apps/readest-app
@@ -87,24 +87,24 @@ jobs:
           apk=$(find "$apk_dir" -type f -name '*-release.apk' -print -quit)
           test -n "$apk"
           mkdir -p dist
-          cp "$apk" dist/Readest-Gemini-TTS-arm64.apk
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs dist/Readest-Gemini-TTS-arm64.apk
+          cp "$apk" dist/Readest-MiMo-TTS-arm64.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs dist/Readest-MiMo-TTS-arm64.apk
           python - <<'PYVERIFY'
           import zipfile
-          with zipfile.ZipFile('dist/Readest-Gemini-TTS-arm64.apk') as apk:
+          with zipfile.ZipFile('dist/Readest-MiMo-TTS-arm64.apk') as apk:
               lib = apk.getinfo('lib/arm64-v8a/libreadestlib.so')
               print(f'Rust library: {lib.file_size / 1024**2:.1f} MiB')
               assert lib.file_size < 150 * 1024**2, 'Rust library still contains excessive debug data'
           PYVERIFY
           cd dist
-          sha256sum Readest-Gemini-TTS-arm64.apk > SHA256SUMS
+          sha256sum Readest-MiMo-TTS-arm64.apk > SHA256SUMS
 
       - name: Upload APK
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: readest-gemini-tts-arm64
+          name: readest-mimo-tts-arm64
           path: |
-            apps/readest-app/dist/Readest-Gemini-TTS-arm64.apk
+            apps/readest-app/dist/Readest-MiMo-TTS-arm64.apk
             apps/readest-app/dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 14

@@ -3,34 +3,30 @@ import type { TTSGranularity, TTSMark, TTSVoice, TTSVoicesGroup } from './types'
 import type { TTSController } from './TTSController';
 import { parseSSMLMarks } from '@/utils/ssml';
 import { md5 } from 'js-md5';
-import i18n from '@/i18n/i18n';
 import { eventDispatcher } from '@/utils/event';
 import { TTSUtils } from './TTSUtils';
 import {
-  buildGeminiBatches,
-  estimateGeminiSeconds,
-  GEMINI_VOICES,
-  geminiSpeech,
-  getGeminiConfig,
-  getGeminiDurationScale,
-  recordGeminiDurationScale,
-  GEMINI_BUDGET_MESSAGE,
-  GEMINI_RESERVE_MESSAGE,
-  GEMINI_RETRY_MESSAGE,
-  type GeminiAudio,
-  type GeminiBatch,
-  type GeminiSentence,
-} from './gemini';
+  buildMiMoBatches,
+  estimateMiMoSeconds,
+  MIMO_VOICES,
+  mimoSpeech,
+  getMiMoConfig,
+  getMiMoDurationScale,
+  recordMiMoDurationScale,
+  type MiMoAudio,
+  type MiMoBatch,
+  type MiMoSentence,
+} from './mimo';
 
 const normalize = (text: string) => text.replace(/\s+/g, ' ').trim();
 interface PreparedSection {
   id: string;
-  sentences: GeminiSentence[];
+  sentences: MiMoSentence[];
 }
-interface PreparedBatch extends GeminiBatch {
+interface PreparedBatch extends MiMoBatch {
   first: number;
-  audio?: GeminiAudio;
-  pending?: Promise<GeminiAudio>;
+  audio?: MiMoAudio;
+  pending?: Promise<MiMoAudio>;
   requested?: boolean;
   lookaheadStarted?: boolean;
 }
@@ -38,8 +34,8 @@ interface PreparedBatch extends GeminiBatch {
 // A long recording is kept intact. Sentence locations are proportional
 // estimates used to advance foliate's cursor, never advertised as real
 // text alignment. Pauses/voice changes do not resynthesize cached recordings.
-export class GeminiTTSClient implements TTSClient {
-  name = 'gemini-tts';
+export class MiMoTTSClient implements TTSClient {
+  name = 'mimo-tts';
   initialized = false;
   #lang = 'zh';
   #voice = '';
@@ -52,9 +48,8 @@ export class GeminiTTSClient implements TTSClient {
   #activeEnd = 0;
   #planKey = '';
   #planSignature = '';
-  #sentences: GeminiSentence[] = [];
+  #sentences: MiMoSentence[] = [];
   #batches: PreparedBatch[] = [];
-  #legacyBatches: PreparedBatch[] = [];
   #cursor = 0;
   #audio: HTMLAudioElement | null = null;
   #url: string | null = null;
@@ -67,9 +62,9 @@ export class GeminiTTSClient implements TTSClient {
 
   constructor(private controller?: TTSController) {}
   async init(): Promise<boolean> {
-    const config = getGeminiConfig();
+    const config = getMiMoConfig();
     this.initialized = config.enabled && !!config.apiKey;
-    this.#voice = TTSUtils.getPreferredVoice(this.name, this.#lang) || `gemini:${config.voice}`;
+    this.#voice = TTSUtils.getPreferredVoice(this.name, this.#lang) || `mimo:${config.voice}`;
     return this.initialized;
   }
   activateSection(id: string): boolean {
@@ -87,7 +82,7 @@ export class GeminiTTSClient implements TTSClient {
     }
     return false;
   }
-  prepareSection(id: string, sentences: GeminiSentence[], following: PreparedSection[] = []): void {
+  prepareSection(id: string, sentences: MiMoSentence[], following: PreparedSection[] = []): void {
     const config = this.#config();
     const identity = `${id}|${config.model}|${config.voice}|${config.batchMinutes}`;
     if (this.#section === identity) return;
@@ -101,15 +96,7 @@ export class GeminiTTSClient implements TTSClient {
     sentences = this.#sections.flatMap((section) => section.sentences);
     this.#sentences = sentences;
     this.#batches = [];
-    let legacyFirst = 0;
-    this.#legacyBatches = this.#sections.flatMap((section) =>
-      buildGeminiBatches(section.sentences, config.batchMinutes).map((batch) => {
-        const result = { ...batch, first: legacyFirst };
-        legacyFirst += batch.sentences.length;
-        return result;
-      }),
-    );
-    this.#planKey = `readest-gemini-plan-${md5(identity)}`;
+    this.#planKey = `readest-mimo-plan-${md5(identity)}`;
     this.#planSignature = md5(JSON.stringify(sentences));
     try {
       const plan = JSON.parse(localStorage.getItem(this.#planKey) || '{}') as {
@@ -129,7 +116,7 @@ export class GeminiTTSClient implements TTSClient {
             first,
             requested: plan.requestedEnds?.includes(end),
             sentences: slice,
-            estimatedSeconds: slice.reduce((sum, s) => sum + estimateGeminiSeconds(s.text), 0),
+            estimatedSeconds: slice.reduce((sum, s) => sum + estimateMiMoSeconds(s.text), 0),
           };
           first = end;
           return batch;
@@ -138,10 +125,10 @@ export class GeminiTTSClient implements TTSClient {
     } catch {}
     let first = 0;
     if (!this.#batches.length) {
-      for (const batch of buildGeminiBatches(
+      for (const batch of buildMiMoBatches(
         sentences,
         config.batchMinutes,
-        getGeminiDurationScale(config, sentences[0]?.lang || this.#lang),
+        getMiMoDurationScale(config, sentences[0]?.lang || this.#lang),
       )) {
         this.#batches.push({ ...batch, first });
         first += batch.sentences.length;
@@ -153,7 +140,7 @@ export class GeminiTTSClient implements TTSClient {
     this.#savePlan();
   }
   #config() {
-    return { ...getGeminiConfig(), voice: this.getVoiceId().replace(/^gemini:/, '') };
+    return { ...getMiMoConfig(), voice: this.getVoiceId().replace(/^mimo:/, '') };
   }
   #savePlan(): void {
     if (!this.#planKey) return;
@@ -170,11 +157,11 @@ export class GeminiTTSClient implements TTSClient {
       );
     } catch {}
   }
-  #calibrate(batch: PreparedBatch, audio: GeminiAudio): void {
+  #calibrate(batch: PreparedBatch, audio: MiMoAudio): void {
     if (!this.#batches.includes(batch)) return;
     const config = this.#config();
     const lang = batch.sentences[0]?.lang || this.#lang;
-    recordGeminiDurationScale(config, lang, audio.duration, batch.estimatedSeconds);
+    recordMiMoDurationScale(config, lang, audio.duration, batch.estimatedSeconds);
     // Already requested recordings retain their exact text/cache key. Only
     // unrequested lookahead is resized using the measured narration speed.
     let keep = this.#batches.indexOf(batch) + 1;
@@ -182,10 +169,10 @@ export class GeminiTTSClient implements TTSClient {
       if (this.#batches[i]!.requested || this.#batches[i]!.pending) keep = i + 1;
     const last = this.#batches[keep - 1]!;
     let first = last.first + last.sentences.length;
-    const tail = buildGeminiBatches(
+    const tail = buildMiMoBatches(
       this.#sentences.slice(first),
       config.batchMinutes,
-      getGeminiDurationScale(config, lang),
+      getMiMoDurationScale(config, lang),
     );
     this.#batches.splice(
       keep,
@@ -221,7 +208,7 @@ export class GeminiTTSClient implements TTSClient {
     );
     const batch = this.#batches[position]!;
     if (batch.audio || batch.pending) return batch;
-    const cached = await geminiSpeech.getCached(
+    const cached = await mimoSpeech.getCached(
       batch.sentences.map((s) => s.text).join('\n'),
       this.#config(),
     );
@@ -232,54 +219,6 @@ export class GeminiTTSClient implements TTSClient {
       return batch;
     }
     if (signal.aborted) return batch;
-    // Reuse old per-chapter recordings, including short tails, before
-    // requesting new cross-chapter audio for the same text.
-    const legacy = this.#legacyBatches.find(
-      (candidate) =>
-        index >= candidate.first && index < candidate.first + candidate.sentences.length,
-    );
-    if (
-      legacy &&
-      (legacy.first !== batch.first || legacy.sentences.length !== batch.sentences.length)
-    ) {
-      const end = legacy.first + legacy.sentences.length;
-      const startIndex = this.#batches.findIndex(
-        (candidate) => candidate.first + candidate.sentences.length > legacy.first,
-      );
-      let endIndex = startIndex;
-      while (endIndex < this.#batches.length && this.#batches[endIndex]!.first < end) endIndex++;
-      const overlaps = this.#batches.slice(startIndex, endIndex);
-      if (
-        overlaps.every(
-          (candidate) => candidate === batch || (!candidate.requested && !candidate.pending),
-        )
-      ) {
-        const audio = await geminiSpeech.getCached(
-          legacy.sentences.map((s) => s.text).join('\n'),
-          this.#config(),
-        );
-        if (audio && !signal.aborted && this.#batches.includes(batch)) {
-          const replacements: PreparedBatch[] = [];
-          const addSlice = (first: number, stop: number) => {
-            const slice = this.#sentences.slice(first, stop);
-            if (slice.length)
-              replacements.push({
-                first,
-                sentences: slice,
-                estimatedSeconds: slice.reduce((sum, s) => sum + estimateGeminiSeconds(s.text), 0),
-              });
-          };
-          addSlice(overlaps[0]!.first, legacy.first);
-          const restored = { ...legacy, audio, requested: true };
-          replacements.push(restored);
-          const last = overlaps.at(-1)!;
-          addSlice(end, last.first + last.sentences.length);
-          this.#batches.splice(startIndex, endIndex - startIndex, ...replacements);
-          this.#calibrate(restored, audio);
-          return restored;
-        }
-      }
-    }
     if (this.#nextPosition === null || index === batch.first) return batch;
     // With no cached recording, spend the request on text AFTER the chosen
     // sentence. Keep any already generated future batch's cache key intact.
@@ -293,10 +232,10 @@ export class GeminiTTSClient implements TTSClient {
     const stop = this.#batches[end]?.first ?? this.#sentences.length;
     const config = this.#config();
     let first = index;
-    const tail = buildGeminiBatches(
+    const tail = buildMiMoBatches(
       this.#sentences.slice(index, stop),
       config.batchMinutes,
-      getGeminiDurationScale(config, this.#sentences[index]!.lang),
+      getMiMoDurationScale(config, this.#sentences[index]!.lang),
     ).map((batch) => {
       const result = { ...batch, first };
       first += batch.sentences.length;
@@ -309,28 +248,24 @@ export class GeminiTTSClient implements TTSClient {
       {
         first: batch.first,
         sentences: prefix,
-        estimatedSeconds: prefix.reduce((sum, s) => sum + estimateGeminiSeconds(s.text), 0),
+        estimatedSeconds: prefix.reduce((sum, s) => sum + estimateMiMoSeconds(s.text), 0),
       },
       ...tail,
     );
     this.#savePlan();
     return tail[0]!;
   }
-  async #getAudio(
-    batch: PreparedBatch,
-    signal: AbortSignal,
-    preload = false,
-  ): Promise<GeminiAudio> {
+  async #getAudio(batch: PreparedBatch, signal: AbortSignal, preload = false): Promise<MiMoAudio> {
     if (batch.audio) return batch.audio;
     if (batch.pending) {
       try {
         return await batch.pending;
       } catch {
-        /* foreground may use the last regular request */
+        /* Foreground reading can retry a failed lookahead. */
       }
     }
     const generation = this.#generation;
-    const pending = geminiSpeech.generate(
+    const pending = mimoSpeech.generate(
       batch.sentences.map((s) => s.text).join('\n'),
       this.#config(),
       {
@@ -354,13 +289,10 @@ export class GeminiTTSClient implements TTSClient {
         error instanceof Error &&
         error.name !== 'AbortError'
       ) {
-        const message = [GEMINI_BUDGET_MESSAGE, GEMINI_RESERVE_MESSAGE].includes(error.message)
-          ? error.message
-          : GEMINI_RETRY_MESSAGE;
         void eventDispatcher.dispatch('toast', {
-          message: i18n.t(message),
+          message: error.message,
           type: 'error',
-          timeout: 8000,
+          timeout: 12000,
         });
       }
       throw error;
@@ -386,7 +318,7 @@ export class GeminiTTSClient implements TTSClient {
   }
   async #load(
     batch: PreparedBatch,
-    audio: GeminiAudio,
+    audio: MiMoAudio,
     signal: AbortSignal,
   ): Promise<HTMLAudioElement> {
     if (this.#loadedBatch === batch && this.#audio) return this.#audio;
@@ -410,7 +342,7 @@ export class GeminiTTSClient implements TTSClient {
       };
       const failed = () => {
         cleanup();
-        reject(new Error('Could not play the generated Gemini audio.'));
+        reject(new Error('Could not play the generated MiMo audio.'));
       };
       const aborted = () => {
         cleanup();
@@ -432,7 +364,7 @@ export class GeminiTTSClient implements TTSClient {
     return player;
   }
   #bounds(batch: PreparedBatch, index: number, duration: number): { start: number; end: number } {
-    const weights = batch.sentences.map((s) => estimateGeminiSeconds(s.text));
+    const weights = batch.sentences.map((s) => estimateMiMoSeconds(s.text));
     const total = weights.reduce((a, b) => a + b, 0);
     const local = index - batch.first;
     const before = weights.slice(0, local).reduce((a, b) => a + b, 0);
@@ -460,7 +392,7 @@ export class GeminiTTSClient implements TTSClient {
       };
       const failed = () => {
         cleanup();
-        reject(new Error('Gemini audio playback failed.'));
+        reject(new Error('MiMo audio playback failed.'));
       };
       const check = () => {
         // At most one recording ahead, only near the audible end. Paused or
@@ -471,7 +403,7 @@ export class GeminiTTSClient implements TTSClient {
           !this.#paused &&
           !this.controller?.stopAtChapterEnd &&
           !player.paused &&
-          (batch.audio?.duration || player.duration) - player.currentTime <= 75 * this.#rate
+          (batch.audio?.duration || player.duration) - player.currentTime <= 20 * this.#rate
         ) {
           const next = this.#batches[this.#batches.indexOf(batch) + 1];
           if (next && !next.audio && !next.pending && !next.lookaheadStarted && !lookedAhead) {
@@ -521,15 +453,15 @@ export class GeminiTTSClient implements TTSClient {
     if (first < 0) {
       if (this.#sentences.length)
         throw new Error(
-          'The selected speech text could not be matched to this chapter. No Gemini request was sent.',
+          'The selected speech text could not be matched to this chapter. No MiMo request was sent.',
         );
       // Selection-only reading can contain a range absent from the section.
       // It is an explicit short request; ordinary reading always batches.
       first = 0;
       let ordinal = 0;
-      batches = buildGeminiBatches(
+      batches = buildMiMoBatches(
         marks.map((m) => ({ text: m.text, lang: m.language })),
-        getGeminiConfig().batchMinutes,
+        getMiMoConfig().batchMinutes,
       ).map((batch) => {
         const result = { ...batch, first: ordinal };
         ordinal += batch.sentences.length;
@@ -617,7 +549,7 @@ export class GeminiTTSClient implements TTSClient {
   }
   async setPitch(_pitch: number): Promise<void> {}
   async setVoice(voice: string): Promise<void> {
-    if (GEMINI_VOICES.some((v) => `gemini:${v}` === voice)) {
+    if (MIMO_VOICES.some((v) => `mimo:${v}` === voice)) {
       this.#voice = voice;
       if (this.#sectionId) {
         const active = this.#activeSection;
@@ -630,14 +562,14 @@ export class GeminiTTSClient implements TTSClient {
     }
   }
   getVoiceId(): string {
-    return this.#voice || `gemini:${getGeminiConfig().voice}`;
+    return this.#voice || `mimo:${getMiMoConfig().voice}`;
   }
   getSpeakingLang(): string {
     return this.#lang;
   }
   async getAllVoices(): Promise<TTSVoice[]> {
-    return GEMINI_VOICES.map((voice) => ({
-      id: `gemini:${voice}`,
+    return MIMO_VOICES.map((voice) => ({
+      id: `mimo:${voice}`,
       name: voice,
       lang: this.#lang,
       disabled: !this.initialized,
@@ -648,7 +580,7 @@ export class GeminiTTSClient implements TTSClient {
     return [
       {
         id: this.name,
-        name: 'Gemini TTS',
+        name: 'MiMo TTS',
         disabled: !this.initialized,
         voices: (await this.getAllVoices()).map((v) => ({ ...v, lang })),
       },

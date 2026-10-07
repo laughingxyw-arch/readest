@@ -15,6 +15,8 @@ vi.mock('@/services/tts/WebSpeechClient', () => ({
 }));
 
 vi.mock('@/services/tts/EdgeTTSClient', () => ({
+  DEFAULT_SENTENCE_GAP_SEC: 0,
+  DEFAULT_PARAGRAPH_GAP_SEC: 0,
   EdgeTTSClient: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
     Object.assign(this, createMockTTSClient('edge'), {
       setSentenceGap: vi.fn(),
@@ -186,11 +188,11 @@ describe('TTSController', () => {
   // EventTarget rejects it as "parameter 1 is not of type 'Event'" (#5149).
   const speakingControllers: TTSController[] = [];
 
-  test('does not speculatively generate Gemini paragraphs before section batching', async () => {
+  test('does not speculatively generate MiMo paragraphs before section batching', async () => {
     await controller.initViewTTS(0);
-    controller.ttsClient = controller.ttsGeminiClient;
+    controller.ttsClient = controller.ttsMiMoClient;
     const speak = vi
-      .spyOn(controller.ttsGeminiClient, 'speak')
+      .spyOn(controller.ttsMiMoClient, 'speak')
       .mockImplementation(async function* () {});
     await controller.preloadNextSSML();
     expect(speak).not.toHaveBeenCalled();

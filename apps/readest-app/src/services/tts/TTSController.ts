@@ -19,14 +19,13 @@ import { expandRangeOverRuby } from '@/utils/ruby';
 import { WebSpeechClient } from './WebSpeechClient';
 import { NativeTTSClient } from './NativeTTSClient';
 import { EdgeTTSClient } from './EdgeTTSClient';
-import { GeminiTTSClient } from './GeminiTTSClient';
+import { MiMoTTSClient } from './MiMoTTSClient';
 import {
-  estimateGeminiSeconds,
-  getGeminiConfig,
-  getGeminiDurationScale,
-  getGeminiRegularLimit,
-  type GeminiSentence,
-} from './gemini';
+  estimateMiMoSeconds,
+  getMiMoConfig,
+  getMiMoDurationScale,
+  type MiMoSentence,
+} from './mimo';
 import { md5 } from 'js-md5';
 import { SectionTimeline, TimelineSentence } from './SectionTimeline';
 import { hydrateProvisionalDurations } from './ttsDuration';
@@ -224,8 +223,8 @@ export class TTSController extends EventTarget {
   ttsClient: TTSClient;
   ttsWebClient: TTSClient;
   ttsEdgeClient: EdgeTTSClient;
-  ttsGeminiClient: GeminiTTSClient;
-  #geminiPreparedSection = '';
+  ttsMiMoClient: MiMoTTSClient;
+  #mimoPreparedSection = '';
   ttsNativeClient: TTSClient | null = null;
   ttsMediaOverlayClient: MediaOverlayClient;
   ttsWebVoices: TTSVoice[] = [];
@@ -245,7 +244,7 @@ export class TTSController extends EventTarget {
     super();
     this.ttsWebClient = new WebSpeechClient(this);
     this.ttsEdgeClient = new EdgeTTSClient(this, appService);
-    this.ttsGeminiClient = new GeminiTTSClient(this);
+    this.ttsMiMoClient = new MiMoTTSClient(this);
     // Native TTS is backed by Android TextToSpeech and iOS AVSpeechSynthesizer.
     // TODO: implement native TTS client for desktop platforms.
     if (appService?.isAndroidApp || appService?.isIOSApp) {
@@ -430,8 +429,8 @@ export class TTSController extends EventTarget {
 
   async init() {
     const availableClients = [];
-    if (await this.ttsGeminiClient.init()) {
-      availableClients.push(this.ttsGeminiClient);
+    if (await this.ttsMiMoClient.init()) {
+      availableClients.push(this.ttsMiMoClient);
     }
     if (await this.ttsEdgeClient.init()) {
       availableClients.push(this.ttsEdgeClient);
@@ -1484,8 +1483,8 @@ export class TTSController extends EventTarget {
   }
 
   async preloadNextSSML(count: number = 4) {
-    // Gemini prepares the whole chapter in #speak. Paragraph lookahead can
-    // race that preparation and spend quota on short fallback requests.
+    // MiMo prepares the whole chapter in #speak. Paragraph lookahead can
+    // race that preparation and generate duplicate short fallback recordings.
     if (this.ttsClient.getCapabilities().managesLookahead) return;
     const tts = this.#getTts();
     if (!tts) return;
@@ -1540,25 +1539,25 @@ export class TTSController extends EventTarget {
     return ssml;
   }
 
-  async #prepareGeminiSection(signal: AbortSignal): Promise<void> {
-    if (this.ttsClient !== this.ttsGeminiClient) return;
+  async #prepareMiMoSection(signal: AbortSignal): Promise<void> {
+    if (this.ttsClient !== this.ttsMiMoClient) return;
     const sectionId = (index: number) =>
       `${this.bookKey?.split('-')[0]}:${index}:${this.ttsLang}:${this.ttsTargetLang}:${this.#skipInlineAnnotations}`;
     const id = sectionId(this.#ttsSectionIndex);
-    if (this.#geminiPreparedSection === id) return;
-    if (this.ttsGeminiClient.activateSection(id)) {
-      this.#geminiPreparedSection = id;
+    if (this.#mimoPreparedSection === id) return;
+    if (this.ttsMiMoClient.activateSection(id)) {
+      this.#mimoPreparedSection = id;
       return;
     }
     const sections = this.view.book.sections;
     if (!sections?.[this.#ttsSectionIndex]?.createDocument)
-      throw new Error('This book section cannot be prepared for Gemini TTS.');
+      throw new Error('This book section cannot be prepared for MiMo TTS.');
     const config = {
-      ...getGeminiConfig(),
-      voice: this.ttsGeminiClient.getVoiceId().replace(/^gemini:/, ''),
+      ...getMiMoConfig(),
+      voice: this.ttsMiMoClient.getVoiceId().replace(/^mimo:/, ''),
     };
     const windowKey = (index: number) =>
-      `readest-gemini-window-${md5(`${sectionId(index)}:${config.batchMinutes}`)}`;
+      `readest-mimo-window-${md5(`${sectionId(index)}:${config.batchMinutes}`)}`;
     let start = this.#ttsSectionIndex;
     let savedEnd = -1;
     // Reopening any chapter in a prepared window rebuilds the same text and
@@ -1585,10 +1584,10 @@ export class TTSController extends EventTarget {
       import('foliate-js/tts.js'),
       import('foliate-js/text-walker.js'),
     ]);
-    const prepared: { id: string; sentences: GeminiSentence[] }[] = [];
+    const prepared: { id: string; sentences: MiMoSentence[] }[] = [];
     let estimated = 0;
-    const scale = getGeminiDurationScale(config, this.ttsLang || 'en');
-    const target = config.batchMinutes * 60 * Math.min(8, getGeminiRegularLimit(config));
+    const scale = getMiMoDurationScale(config, this.ttsLang || 'en');
+    const target = config.batchMinutes * 60 * 8;
     // Text lookahead only. Audio lookahead stays at one recording. Avoid
     // translating unread chapters when translated speech is selected.
     const maxSections = this.ttsTargetLang ? 1 : 128;
@@ -1608,7 +1607,7 @@ export class TTSController extends EventTarget {
         break;
       const section = sections[index];
       if (!section?.createDocument) break;
-      const sentences: GeminiSentence[] = [];
+      const sentences: MiMoSentence[] = [];
       try {
         const doc = await this.#createSectionDoc(section);
         // Fresh iterators never move the visible chapter's text cursor.
@@ -1642,23 +1641,20 @@ export class TTSController extends EventTarget {
         if (index <= this.#ttsSectionIndex) throw error;
         break; // A broken future chapter must not block the current one.
       }
-      estimated += sentences.reduce(
-        (sum, sentence) => sum + estimateGeminiSeconds(sentence.text),
-        0,
-      );
+      estimated += sentences.reduce((sum, sentence) => sum + estimateMiMoSeconds(sentence.text), 0);
       prepared.push({ id: sectionId(index), sentences });
     }
     if (signal.aborted) return;
     const [first, ...following] = prepared;
-    if (!first) throw new Error('This book section cannot be prepared for Gemini TTS.');
-    this.ttsGeminiClient.prepareSection(first.id, first.sentences, following);
-    this.ttsGeminiClient.activateSection(id);
+    if (!first) throw new Error('This book section cannot be prepared for MiMo TTS.');
+    this.ttsMiMoClient.prepareSection(first.id, first.sentences, following);
+    this.ttsMiMoClient.activateSection(id);
     try {
       const window = JSON.stringify({ start, end: start + prepared.length - 1 });
       for (let index = start; index < start + prepared.length; index++)
         localStorage.setItem(windowKey(index), window);
     } catch {}
-    this.#geminiPreparedSection = id;
+    this.#mimoPreparedSection = id;
   }
 
   async #speak(ssml: string | undefined | Promise<string>, oneTime = false) {
@@ -1721,7 +1717,7 @@ export class TTSController extends EventTarget {
           } else {
             this.dispatchSpeakMark(marks[0]);
           }
-          await this.#prepareGeminiSection(signal);
+          await this.#prepareMiMoSection(signal);
           if (!this.ttsClient.getCapabilities().managesLookahead)
             await this.preloadSSML(ssml, signal);
         }
@@ -2114,7 +2110,7 @@ export class TTSController extends EventTarget {
   }
 
   async setPrimaryLang(lang: string) {
-    if (this.ttsGeminiClient.initialized) this.ttsGeminiClient.setPrimaryLang(lang);
+    if (this.ttsMiMoClient.initialized) this.ttsMiMoClient.setPrimaryLang(lang);
     if (this.ttsEdgeClient.initialized) this.ttsEdgeClient.setPrimaryLang(lang);
     if (this.ttsWebClient.initialized) this.ttsWebClient.setPrimaryLang(lang);
     if (this.ttsNativeClient?.initialized) this.ttsNativeClient?.setPrimaryLang(lang);
@@ -2131,7 +2127,7 @@ export class TTSController extends EventTarget {
   }
 
   async getVoices(lang: string) {
-    const ttsGeminiVoices = await this.ttsGeminiClient.getVoices(lang);
+    const ttsMiMoVoices = await this.ttsMiMoClient.getVoices(lang);
     const ttsWebVoices = await this.ttsWebClient.getVoices(lang);
     const ttsEdgeVoices = await this.ttsEdgeClient.getVoices(lang);
     const ttsNativeVoices = (await this.ttsNativeClient?.getVoices(lang)) ?? [];
@@ -2143,7 +2139,7 @@ export class TTSController extends EventTarget {
 
     const voicesGroups = [
       ...narrationVoices,
-      ...ttsGeminiVoices,
+      ...ttsMiMoVoices,
       ...ttsNativeVoices,
       ...ttsEdgeVoices,
       ...ttsWebVoices,
@@ -2180,11 +2176,11 @@ export class TTSController extends EventTarget {
     const useNativeTTS = !!this.ttsNativeVoices.find(
       (voice) => (voiceId === '' || voice.id === voiceId) && !voice.disabled,
     );
-    if (voiceId.startsWith('gemini:')) {
-      if (!this.ttsGeminiClient.initialized && !(await this.ttsGeminiClient.init())) {
-        throw new Error('Enable Gemini TTS and save your API key in Settings → TTS first.');
+    if (voiceId.startsWith('mimo:')) {
+      if (!this.ttsMiMoClient.initialized && !(await this.ttsMiMoClient.init())) {
+        throw new Error('Enable MiMo TTS and save your API key in Settings → TTS first.');
       }
-      this.ttsClient = this.ttsGeminiClient;
+      this.ttsClient = this.ttsMiMoClient;
       await this.ttsClient.setRate(this.ttsRate);
     } else if (useEdgeTTS) {
       this.ttsClient = this.ttsEdgeClient;
@@ -2531,7 +2527,7 @@ export class TTSController extends EventTarget {
     if (this.ttsEdgeClient.initialized) {
       await this.ttsEdgeClient.shutdown();
     }
-    await this.ttsGeminiClient.shutdown();
+    await this.ttsMiMoClient.shutdown();
     if (this.ttsNativeClient?.initialized) {
       await this.ttsNativeClient.shutdown();
     }
