@@ -28,7 +28,7 @@ interface TouchGesture {
   turnIntent?: TurnGestureIntent;
 }
 const touchGestures = new Map<string, TouchGesture>();
-const suppressedSwipeClicks = new Map<string, { until: number; endX: number; endY: number }>();
+const suppressedGestureClicks = new Map<string, { until: number; endX: number; endY: number }>();
 interface LayeredTurnTouchClaim {
   claimed: boolean;
   ended: boolean;
@@ -166,16 +166,18 @@ const suppressDomClick = (event: MouseEvent) => {
 };
 
 const consumeSuppressedDomClick = (bookKey: string, event: MouseEvent, now: number) => {
-  const suppressedSwipe = suppressedSwipeClicks.get(bookKey);
-  if (suppressedSwipe) {
-    if (now > suppressedSwipe.until) {
-      suppressedSwipeClicks.delete(bookKey);
+  const suppressedGesture = suppressedGestureClicks.get(bookKey);
+  if (suppressedGesture) {
+    if (now > suppressedGesture.until) {
+      suppressedGestureClicks.delete(bookKey);
     } else {
       const nearEnd =
-        Math.hypot(event.screenX - suppressedSwipe.endX, event.screenY - suppressedSwipe.endY) <=
-        SYNTHESIZED_CLICK_POSITION_SLOP_PX;
+        Math.hypot(
+          event.screenX - suppressedGesture.endX,
+          event.screenY - suppressedGesture.endY,
+        ) <= SYNTHESIZED_CLICK_POSITION_SLOP_PX;
       if (nearEnd) {
-        suppressedSwipeClicks.delete(bookKey);
+        suppressedGestureClicks.delete(bookKey);
         clearLayeredTurnTouchClaim(bookKey);
         suppressDomClick(event);
         return true;
@@ -191,8 +193,8 @@ const consumeSuppressedDomClick = (bookKey: string, event: MouseEvent, now: numb
   return false;
 };
 
-// Runs before Foliate's bubble-phase link handler. Only recognized swipes are
-// intercepted here; ordinary clicks retain their existing listener order and
+// Runs before Foliate's bubble-phase link handler. Recognized swipes and holds
+// are intercepted here; ordinary clicks retain their existing listener order and
 // link/media/footnote behavior.
 export const handleClickCapture = (bookKey: string, event: MouseEvent) => {
   consumeSuppressedDomClick(bookKey, event, Date.now());
@@ -631,6 +633,26 @@ export const handleClick = (
       return;
     }
 
+    const doc = element?.ownerDocument;
+    if (
+      doc &&
+      event.button === 0 &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.metaKey &&
+      !event.shiftKey &&
+      !media &&
+      (doc.getSelection()?.isCollapsed ?? true) &&
+      eventDispatcher.dispatchSync('tts-highlight-click', {
+        bookKey,
+        doc,
+        x: event.clientX,
+        y: event.clientY,
+      })
+    ) {
+      return;
+    }
+
     window.postMessage(
       {
         type: 'iframe-single-click',
@@ -753,8 +775,11 @@ const handleTouchEv = (bookKey: string, event: TouchEvent, type: string) => {
           releasedTouch.screenX - gesture.startX,
           releasedTouch.screenY - gesture.startY,
         ) >= SYNTHESIZED_CLICK_SWIPE_DISTANCE_PX);
-    if (type === 'iframe-touchend' && moved && gesture) {
-      suppressedSwipeClicks.set(bookKey, {
+    // Touch browsers emit compatibility mousedown/up/click only AFTER the
+    // finger lifts, so the mouse hold timer cannot recognize a touch hold.
+    const held = gesture && event.timeStamp - gesture.startTime >= LONG_HOLD_THRESHOLD;
+    if (type === 'iframe-touchend' && (moved || held) && gesture) {
+      suppressedGestureClicks.set(bookKey, {
         until: Date.now() + SYNTHESIZED_CLICK_SUPPRESSION_MS,
         endX: releasedTouch?.screenX ?? gesture.startX,
         endY: releasedTouch?.screenY ?? gesture.startY,

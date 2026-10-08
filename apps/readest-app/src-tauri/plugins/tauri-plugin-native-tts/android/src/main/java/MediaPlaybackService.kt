@@ -133,6 +133,7 @@ class MediaPlaybackService : MediaBrowserServiceCompat() {
     // Resume after a TRANSIENT focus loss only if the loss is what paused us
     // (nav prompt, call); a user pause before the loss must stay a pause.
     private var resumeOnFocusGain = false
+    private var sessionOwnsAudioFocus = true
 
     // The real TTS audio renders in the WebView (or TextToSpeech), so pausing
     // the local keep-alive player alone would keep speech talking over the
@@ -143,6 +144,9 @@ class MediaPlaybackService : MediaBrowserServiceCompat() {
     // not lag the round trip.
     private val afChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         Log.i("MediaPlaybackService", "Audio focus changed: $focusChange, playing=${player.isPlaying}")
+        // A callback already queued for the old request must not pause the
+        // WebView after ownership has moved to its media element.
+        if (!ownsAudioFocus) return@OnAudioFocusChangeListener
         when (focusChange) {
             AudioManager.AUDIOFOCUS_GAIN -> {
                 if (resumeOnFocusGain) {
@@ -595,6 +599,14 @@ class MediaPlaybackService : MediaBrowserServiceCompat() {
         // Whatever the car selected has arrived and is starting; the pending
         // selection no longer needs a failure timer.
         cancelSelectionWatchdog()
+        // An engine switch can keep the same active session while moving
+        // playout between TextToSpeech/WebAudio and a WebView media element.
+        // Updating the shared flag alone leaves the old focus request alive.
+        if (sessionActive && sessionOwnsAudioFocus != ownsAudioFocus) {
+            resumeOnFocusGain = false
+            if (ownsAudioFocus) requestFocus() else abandonFocus()
+        }
+        sessionOwnsAudioFocus = ownsAudioFocus
         if (!sessionActive) {
             sessionActive = true
 

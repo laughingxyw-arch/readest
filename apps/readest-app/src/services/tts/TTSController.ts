@@ -271,7 +271,11 @@ export class TTSController extends EventTarget {
   // stop()/error().
   set state(value: TTSState) {
     if (this.#state === value) return;
+    const wasPaused = this.#state.includes('paused');
     this.#state = value;
+    if (value.includes('paused') || (wasPaused && value === 'playing')) {
+      this.#updateHighlightAppearance();
+    }
     queueMicrotask(() => {
       this.dispatchEvent(new CustomEvent('tts-state-change', { detail: { state: value } }));
     });
@@ -657,7 +661,17 @@ export class TTSController extends EventTarget {
         if (!visibleRange) return;
         const { style, color } = this.options;
         overlayer?.remove(HIGHLIGHT_KEY);
-        overlayer?.add(HIGHLIGHT_KEY, visibleRange, Overlayer[style], { color });
+        overlayer?.add(
+          HIGHLIGHT_KEY,
+          visibleRange,
+          (rects: DOMRect[], options: { color: string }) => {
+            const element = Overlayer[style](rects, options);
+            element.setAttribute('data-tts-highlight', '');
+            element.style.filter = this.state.includes('paused') ? 'brightness(0.55)' : '';
+            return element;
+          },
+          { color },
+        );
       } catch (e) {
         console.error('Failed to highlight range', e);
       }
@@ -675,6 +689,41 @@ export class TTSController extends EventTarget {
       overlayer?.remove(HIGHLIGHT_KEY);
       overlayer?.remove(SEEK_PREVIEW_KEY);
     }
+  }
+
+  #updateHighlightAppearance() {
+    if (!this.#attached) return;
+    for (const content of this.view.renderer.getContents()) {
+      const overlayer = content.overlayer as Overlayer | undefined;
+      const svg = overlayer?.element as SVGElement | undefined;
+      const element = svg?.querySelector<SVGElement>('[data-tts-highlight]');
+      if (element) element.style.filter = this.state.includes('paused') ? 'brightness(0.55)' : '';
+    }
+  }
+
+  // Coordinates belong to the clicked iframe, not the reader window. Saved
+  // annotations win even when the playback overlay was drawn more recently.
+  isHighlightAt(doc: Document, x: number, y: number): boolean {
+    if (!this.#attached || (this.state !== 'playing' && !this.state.includes('paused'))) {
+      return false;
+    }
+    const content = this.view.renderer.getContents().find((content) => content.doc === doc);
+    const overlayer = content?.overlayer as Overlayer | undefined;
+    if (!overlayer) return false;
+    const [annotation] = overlayer.hitTest(
+      { x, y },
+      (key: string) => key.startsWith('epubcfi(') || key.startsWith('foliate-note:'),
+    );
+    if (annotation) return false;
+    const [key, , rect] = overlayer.hitTest({ x, y }, (key: string) => key === HIGHLIGHT_KEY);
+    return (
+      key === HIGHLIGHT_KEY &&
+      !!rect &&
+      x >= rect.left &&
+      x < rect.right &&
+      y >= rect.top &&
+      y < rect.bottom
+    );
   }
 
   updateHighlightOptions(options: TTSHighlightOptions) {

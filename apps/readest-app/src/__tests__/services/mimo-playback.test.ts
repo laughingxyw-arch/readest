@@ -46,6 +46,111 @@ afterEach(() => {
 });
 
 describe('MiMo recording playback', () => {
+  it('leaves Android audio focus with the WebView media element', () => {
+    expect(new MiMoTTSClient().getCapabilities()).toMatchObject({ ownsAudioFocus: false });
+  });
+
+  it('reports a loaded recording whose playback clock stops without an error', async () => {
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({ blob: new Blob(['test']), duration: 30 });
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('chapter-stalled', [{ text: '测试。', lang: 'zh' }]);
+    const playback = client
+      .speak('<speak><mark name="a"/>测试。</speak>', new AbortController().signal)
+      [Symbol.asyncIterator]();
+    await playback.next();
+    const end = playback.next();
+    const outcome = end.then(
+      () => 'finished',
+      (error) => (error as Error).message,
+    );
+    await vi.advanceTimersByTimeAsync(11000);
+    expect(await Promise.race([outcome, Promise.resolve('still waiting')])).toMatch(
+      /not progressing/,
+    );
+    expect(MockAudio.instances[0]!.paused).toBe(true);
+    await client.shutdown();
+  });
+
+  it('bounds a play promise that never resolves without reporting a media error', async () => {
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({ blob: new Blob(['test']), duration: 30 });
+    vi.spyOn(MockAudio.prototype, 'play').mockImplementation(function (this: MockAudio) {
+      this.paused = false;
+      return new Promise<void>(() => {});
+    });
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('chapter-pending', [{ text: '测试。', lang: 'zh' }]);
+    const playback = client
+      .speak('<speak><mark name="a"/>测试。</speak>', new AbortController().signal)
+      [Symbol.asyncIterator]();
+    const outcome = playback.next().then(
+      () => 'finished',
+      (error) => (error as Error).message,
+    );
+    await vi.advanceTimersByTimeAsync(11000);
+    expect(await Promise.race([outcome, Promise.resolve('still waiting')])).toMatch(
+      /did not start/,
+    );
+    expect(MockAudio.instances[0]!.paused).toBe(true);
+    await client.shutdown();
+  });
+
+  it('does not treat a user pause as a stuck audio clock', async () => {
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({ blob: new Blob(['test']), duration: 30 });
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('chapter-paused', [{ text: '测试。', lang: 'zh' }]);
+    const playback = client
+      .speak('<speak><mark name="a"/>测试。</speak>', new AbortController().signal)
+      [Symbol.asyncIterator]();
+    await playback.next();
+    const end = playback.next();
+    const outcome = end.then(
+      () => 'finished',
+      (error) => (error as Error).message,
+    );
+    await client.pause();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(await Promise.race([outcome, Promise.resolve('still waiting')])).toBe('still waiting');
+    await client.resume();
+    MockAudio.instances[0]!.currentTime = 1;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await Promise.race([outcome, Promise.resolve('still waiting')])).toBe('still waiting');
+    await client.stop();
+    await vi.advanceTimersByTimeAsync(60);
+    await end;
+    await client.shutdown();
+  });
+
+  it('allows pause and resume while the first play promise is pending', async () => {
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({ blob: new Blob(['test']), duration: 30 });
+    let rejectPlay!: (reason: unknown) => void;
+    const play = vi.spyOn(MockAudio.prototype, 'play').mockImplementationOnce(function (
+      this: MockAudio,
+    ) {
+      this.paused = false;
+      return new Promise<void>((_, reject) => {
+        rejectPlay = reject;
+      });
+    });
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('chapter-pausing', [{ text: '测试。', lang: 'zh' }]);
+    const playback = client
+      .speak('<speak><mark name="a"/>测试。</speak>', new AbortController().signal)
+      [Symbol.asyncIterator]();
+    const first = playback.next();
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    await client.pause();
+    rejectPlay(new DOMException('Play interrupted by pause', 'AbortError'));
+    expect((await first).value?.code).toBe('boundary');
+    await client.resume();
+    expect(play).toHaveBeenCalledTimes(2);
+    await client.shutdown();
+    await playback.return?.();
+  });
+
   it('uses the book position to distinguish identical sentences when starting from a selection', async () => {
     const cached = { blob: new Blob(['test']), duration: 10 };
     vi.spyOn(mimoSpeech, 'getCached').mockResolvedValue(cached);

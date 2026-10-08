@@ -153,8 +153,10 @@ vi.mock('@/services/tts', () => ({
             pendingInitResolvers.push(() => resolve());
           }),
       ),
+      ttsClient: { getCapabilities: vi.fn(() => ({ ownsAudioFocus: false })) },
       initViewTTS: vi.fn().mockResolvedValue(undefined),
       updateHighlightOptions: vi.fn(),
+      isHighlightAt: vi.fn().mockReturnValue(false),
       setHighlightGranularity: vi.fn(),
       setSkipInlineAnnotations: vi.fn(),
       setLang: vi.fn(),
@@ -1027,7 +1029,39 @@ describe('useTTSControl background session lifecycle', () => {
     return ttsControllerInstances[0] as ControllerMock;
   };
 
-  it('claims the session at controller birth', async () => {
+  it('waits for the selected engine before claiming audio focus', async () => {
+    render(<Harness />);
+    await act(async () => {
+      const start = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1' });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const claimedDuringInit = mockSessionManager.claim.mock.calls.length;
+      while (pendingInitResolvers.length > 0) pendingInitResolvers.shift()!();
+      await start;
+      expect(claimedDuringInit).toBe(0);
+    });
+    expect(mockSessionManager.claim).toHaveBeenCalledWith(
+      'book-1',
+      ttsControllerInstances[0],
+      expect.objectContaining({ ownsAudioFocus: false }),
+    );
+  });
+
+  it('does not activate a session stopped during client initialization', async () => {
+    render(<Harness />);
+    await act(async () => {
+      const start = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1' });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      await eventDispatcher.dispatch('tts-stop', { bookKey: 'book-1' });
+      while (pendingInitResolvers.length > 0) pendingInitResolvers.shift()!();
+      await start;
+    });
+    expect(mockSessionManager.claim).not.toHaveBeenCalled();
+    expect(
+      (ttsControllerInstances[0] as { speak: ReturnType<typeof vi.fn> }).speak,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('claims the initialized session', async () => {
     await startSession();
     expect(mockSessionManager.claim).toHaveBeenCalledWith(
       'book-1',
@@ -1119,6 +1153,7 @@ describe('useTTSControl background session lifecycle', () => {
     const liveController = {
       kind: 'tts',
       state: 'playing',
+      ttsClient: { getCapabilities: () => ({ ownsAudioFocus: false }) },
       terminated: false,
       isViewAttached: false,
       shutdown: vi.fn(),
@@ -1131,6 +1166,7 @@ describe('useTTSControl background session lifecycle', () => {
       isSoundingSentenceOnScreen: vi.fn().mockReturnValue(false),
       getSpokenSentence: vi.fn().mockReturnValue(null),
       updateHighlightOptions: vi.fn(),
+      isHighlightAt: vi.fn().mockReturnValue(false),
       setHighlightGranularity: vi.fn(),
       setSkipInlineAnnotations: vi.fn(),
       drawLoopRange: vi.fn(),
@@ -1266,5 +1302,132 @@ describe('useTTSControl gap control (handleSetSentenceGap / handleSupportsGapCon
     expect(mockViewSettings.ttsRate).toBe(1.5);
     expect(controller.setSentenceGap).toHaveBeenCalledWith(0.12);
     expect(controller.setParagraphGap).toHaveBeenCalledWith(0.24);
+  });
+});
+
+describe('useTTSControl highlight taps', () => {
+  beforeEach(() => {
+    ttsControllerInstances.length = 0;
+    pendingInitResolvers.length = 0;
+  });
+  afterEach(() => cleanup());
+
+  async function start() {
+    render(<Harness />);
+    await act(async () => {
+      const pending = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1' });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      while (pendingInitResolvers.length) pendingInitResolvers.shift()!();
+      await pending;
+    });
+    const controller = ttsControllerInstances[0] as {
+      state: string;
+      isHighlightAt: ReturnType<typeof vi.fn>;
+      pause: ReturnType<typeof vi.fn>;
+      resume: ReturnType<typeof vi.fn>;
+      start: ReturnType<typeof vi.fn>;
+    };
+    controller.isHighlightAt.mockReturnValue(true);
+    controller.state = 'playing';
+    controller.pause.mockImplementation(async () => {
+      controller.state = 'paused';
+    });
+    controller.resume.mockImplementation(async () => {
+      controller.state = 'playing';
+    });
+    return controller;
+  }
+  const tap = (bookKey = 'book-1') =>
+    eventDispatcher.dispatchSync('tts-highlight-click', {
+      bookKey,
+      doc: document,
+      x: 40,
+      y: 35,
+    });
+
+  it('pauses and resumes the same task without restarting it', async () => {
+    const controller = await start();
+    await act(async () => {
+      expect(tap()).toBe(true);
+    });
+    expect(controller.pause).toHaveBeenCalledOnce();
+    await act(async () => {
+      expect(tap()).toBe(true);
+    });
+    expect(controller.resume).toHaveBeenCalledOnce();
+    expect(controller.start).not.toHaveBeenCalled();
+  });
+
+  it('ignores outside taps and taps belonging to another book, and unsubscribes', async () => {
+    const controller = await start();
+    expect(tap('other-book')).toBe(false);
+    controller.isHighlightAt.mockReturnValue(false);
+    expect(tap()).toBe(false);
+    controller.isHighlightAt.mockReturnValue(true);
+    cleanup();
+    expect(tap()).toBe(false);
+    expect(controller.pause).not.toHaveBeenCalled();
+  });
+
+  it('keeps selection/popup dismissal ahead of playback toggling', async () => {
+    const controller = await start();
+    const dismiss = () => true;
+    eventDispatcher.onSync('reader-selection-click', dismiss);
+    try {
+      expect(tap()).toBe(true);
+      expect(controller.pause).not.toHaveBeenCalled();
+    } finally {
+      eventDispatcher.offSync('reader-selection-click', dismiss);
+    }
+  });
+
+  it('gives the current highlight priority over generic auto-scroll taps', async () => {
+    const controller = await start();
+    const scrollTap = vi.fn(() => true);
+    eventDispatcher.onSync('iframe-single-click', scrollTap);
+    try {
+      await act(async () => {
+        expect(tap()).toBe(true);
+      });
+      expect(controller.pause).toHaveBeenCalledOnce();
+      expect(scrollTap).not.toHaveBeenCalled();
+    } finally {
+      eventDispatcher.offSync('iframe-single-click', scrollTap);
+    }
+  });
+
+  it('consumes repeated taps while an async pause is still pending', async () => {
+    const controller = await start();
+    let finish!: () => void;
+    controller.pause.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          controller.state = 'paused';
+          finish = resolve;
+        }),
+    );
+    await act(async () => {
+      expect(tap()).toBe(true);
+      expect(tap()).toBe(true);
+    });
+    expect(controller.pause).toHaveBeenCalledOnce();
+    expect(controller.resume).not.toHaveBeenCalled();
+    await act(async () => {
+      finish();
+    });
+    await act(async () => {
+      expect(tap()).toBe(true);
+    });
+    expect(controller.resume).toHaveBeenCalledOnce();
+  });
+
+  it('starts from a paused navigation preview instead of resuming a dead audio task', async () => {
+    const controller = await start();
+    controller.state = 'forward-paused';
+    await act(async () => {
+      expect(tap()).toBe(true);
+    });
+    expect(controller.start).toHaveBeenCalledOnce();
+    expect(controller.resume).not.toHaveBeenCalled();
   });
 });

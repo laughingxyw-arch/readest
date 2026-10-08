@@ -19,6 +19,9 @@ export interface TTSMessageEvent {
 // What the active engine can actually do, so the controller and UI degrade
 // uniformly instead of probing per-feature or comparing client identities.
 export interface TTSCapabilities {
+  // False for WebView media elements, which claim Android audio focus themselves.
+  // Other renderers leave the native media service in charge (default true).
+  ownsAudioFocus?: boolean;
   // Reports word-boundary timings during playback: the controller highlights
   // word-by-word and suppresses the sentence highlight.
   wordBoundaries: boolean;

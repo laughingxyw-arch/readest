@@ -754,3 +754,112 @@ describe('handleWheel on a fit-width PDF page (#6552)', () => {
     spy.mockRestore();
   });
 });
+
+describe('TTS single tap interception', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    document.getSelection()?.removeAllRanges();
+  });
+
+  test('consumes a normal highlight tap before paging, with iframe coordinates', async () => {
+    const { handleClick, handleMousedown, handleMouseup } = await importHandlers();
+    const { eventDispatcher } = await import('@/utils/event');
+    const consume = vi.fn((_event: CustomEvent) => true);
+    eventDispatcher.onSync('tts-highlight-click', consume);
+    const post = vi.spyOn(window, 'postMessage').mockImplementation(() => {});
+    const target = document.createElement('span');
+    const event = mouseEvent({ target, clientX: 40, clientY: 35 });
+    handleMousedown('book-1', event);
+    handleMouseup('book-1', event);
+    handleClick('book-1', { current: true }, false, false, event);
+    expect(consume).toHaveBeenCalledOnce();
+    expect(consume.mock.calls[0]?.[0]).toMatchObject({
+      detail: { bookKey: 'book-1', doc: document, x: 40, y: 35 },
+    });
+    expect(postedTypes(post)).not.toContain('iframe-single-click');
+  });
+
+  test('an explicitly enabled double tap keeps word selection instead of toggling TTS', async () => {
+    const { handleClick, handleMousedown, handleMouseup } = await importHandlers();
+    const { eventDispatcher } = await import('@/utils/event');
+    const consume = vi.fn((_event: CustomEvent) => true);
+    eventDispatcher.onSync('tts-highlight-click', consume);
+    const post = vi.spyOn(window, 'postMessage').mockImplementation(() => {});
+    const event = mouseEvent({ target: document.createElement('span') });
+    for (let i = 0; i < 2; i++) {
+      handleMousedown('book-1', event);
+      handleMouseup('book-1', event);
+      handleClick('book-1', { current: false }, false, false, event);
+      vi.advanceTimersByTime(100);
+    }
+    vi.advanceTimersByTime(300);
+    expect(consume).not.toHaveBeenCalled();
+    expect(postedTypes(post)).toContain('iframe-double-click');
+  });
+
+  test('touch hold followed by compatibility mouse events does not toggle TTS or page', async () => {
+    const { handleTouchStart, handleTouchEnd, handleClick, handleMousedown, handleMouseup } =
+      await importHandlers();
+    const { eventDispatcher } = await import('@/utils/event');
+    const consume = vi.fn((_event: CustomEvent) => true);
+    eventDispatcher.onSync('tts-highlight-click', consume);
+    const post = vi.spyOn(window, 'postMessage').mockImplementation(() => {});
+    const finger = touchPoint(100, 100);
+    handleTouchStart('book-1', touchEvent([finger]));
+    vi.advanceTimersByTime(1000);
+    handleTouchEnd('book-1', { ...touchEvent([], [finger]), timeStamp: 1000 } as TouchEvent);
+    const event = mouseEvent({ target: document.createElement('span') });
+    handleMousedown('book-1', event);
+    handleMouseup('book-1', event);
+    handleClick('book-1', { current: true }, false, false, event);
+    vi.advanceTimersByTime(1);
+    expect(consume).not.toHaveBeenCalled();
+    expect(postedTypes(post)).not.toContain('iframe-single-click');
+  });
+
+  test('a tap outside the highlight retains paging', async () => {
+    const { handleClick, handleMousedown, handleMouseup } = await importHandlers();
+    const { eventDispatcher } = await import('@/utils/event');
+    eventDispatcher.onSync('tts-highlight-click', () => false);
+    const post = vi.spyOn(window, 'postMessage').mockImplementation(() => {});
+    const event = mouseEvent({ target: document.createElement('span') });
+    handleMousedown('book-1', event);
+    handleMouseup('book-1', event);
+    handleClick('book-1', { current: true }, false, false, event);
+    expect(postedTypes(post)).toContain('iframe-single-click');
+  });
+
+  test.each([
+    'link',
+    'long hold',
+    'held drag',
+    'selected text',
+    'modifier',
+  ])('%s bypasses TTS tap', async (kind) => {
+    const { handleClick, handleMousedown, handleMouseup } = await importHandlers();
+    const { eventDispatcher } = await import('@/utils/event');
+    const consume = vi.fn((_event: CustomEvent) => true);
+    eventDispatcher.onSync('tts-highlight-click', consume);
+    const target = document.createElement(kind === 'link' ? 'a' : 'span');
+    target.textContent = '文字';
+    document.body.append(target);
+    if (kind === 'link') target.setAttribute('href', '#link');
+    const event = mouseEvent({ target, ctrlKey: kind === 'modifier' });
+    handleMousedown('book-1', event);
+    if (kind === 'long hold') vi.advanceTimersByTime(2000);
+    if (kind !== 'held drag') handleMouseup('book-1', event);
+    if (kind === 'selected text') {
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      document.getSelection()?.addRange(range);
+    }
+    handleClick('book-1', { current: true }, false, false, event);
+    expect(consume).not.toHaveBeenCalled();
+    target.remove();
+  });
+});

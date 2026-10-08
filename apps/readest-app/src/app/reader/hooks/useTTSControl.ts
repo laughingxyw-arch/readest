@@ -333,6 +333,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
             author: bookData.book.author,
             coverImageUrl: bookData.book.coverImageUrl || null,
             metadataMode: getViewSettings(bookKey)?.ttsMediaMetadata ?? 'sentence',
+            ownsAudioFocus: controller.ttsClient.getCapabilities().ownsAudioFocus ?? true,
             getSectionLabel: () => getProgress(bookKey)?.sectionLabel,
           });
         }
@@ -632,6 +633,30 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
       setTtsSectionIndex(sectionIndex);
     };
 
+    let highlightTogglePending = false;
+    const handleHighlightClick = (event: CustomEvent): boolean => {
+      const detail = event.detail as { bookKey: string; doc: Document; x: number; y: number };
+      if (
+        detail.bookKey !== bookKey ||
+        !ttsController.isHighlightAt(detail.doc, detail.x, detail.y)
+      ) {
+        return false;
+      }
+      // Dismiss selection/popups first. The highlight takes priority over
+      // generic page gestures such as auto-scroll's tap-to-pause.
+      if (eventDispatcher.dispatchSync('reader-selection-click', { bookKey })) return true;
+      if (!highlightTogglePending) {
+        highlightTogglePending = true;
+        void handleTTSTogglePlay(new CustomEvent('tts-toggle-play', { detail: { bookKey } }))
+          .catch((error: unknown) => ttsController.error(error))
+          .finally(() => {
+            highlightTogglePending = false;
+          });
+      }
+      return true;
+    };
+    eventDispatcher.onSync('tts-highlight-click', handleHighlightClick);
+
     ttsController.addEventListener('tts-need-auth', handleNeedAuth);
     ttsController.addEventListener('tts-highlight-mark', handleHighlightMark);
     ttsController.addEventListener('tts-highlight-word', handleHighlightWord);
@@ -643,6 +668,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     setTtsSectionIndex(ttsController.getSectionIndex());
     return () => {
       stopPageFollow();
+      eventDispatcher.offSync('tts-highlight-click', handleHighlightClick);
       ttsController.removeEventListener('tts-need-auth', handleNeedAuth);
       ttsController.removeEventListener('tts-highlight-mark', handleHighlightMark);
       ttsController.removeEventListener('tts-highlight-word', handleHighlightWord);
@@ -980,12 +1006,21 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         ttsController.pairedAudiobook = bookData.config?.audiobook;
         ttsControllerRef.current = ttsController;
         setTtsController(ttsController);
+        // Resolve the selected engine before activating the native media service:
+        // MiMo's WebView media element must be the sole Android focus owner.
+        ttsController.useNarration = viewSettings.ttsUseNarration ?? true;
+        await ttsController.init();
+        if (ttsControllerRef.current !== ttsController) {
+          await ttsController.shutdown();
+          return;
+        }
         ttsSessionManager.claim(bookKey, ttsController, {
           bookKey,
           title: bookData.book.title,
           author: bookData.book.author,
           coverImageUrl: bookData.book.coverImageUrl || null,
           metadataMode: viewSettings.ttsMediaMetadata ?? 'sentence',
+          ownsAudioFocus: ttsController.ttsClient.getCapabilities().ownsAudioFocus ?? true,
           getSectionLabel: () => getProgress(bookKey)?.sectionLabel,
         });
         // Reflect a standing "End of Chapter" preference (or an already-armed
@@ -1002,10 +1037,6 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
           }
         }
 
-        // Must precede init(): it decides whether this session plays the book's
-        // own narration or a synthesized voice.
-        ttsController.useNarration = viewSettings.ttsUseNarration ?? true;
-        await ttsController.init();
         await ttsController.initViewTTS(ttsFromIndex);
         ttsController.updateHighlightOptions(
           getTTSHighlightOptions(
@@ -1295,9 +1326,15 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         if (ttsController.state === 'playing') {
           await ttsController.stop();
           await ttsController.setVoice(voice, lang);
+          await ttsMediaBridge.setAudioFocusOwnership(
+            ttsController.ttsClient.getCapabilities().ownsAudioFocus ?? true,
+          );
           await ttsController.start();
         } else {
           await ttsController.setVoice(voice, lang);
+          await ttsMediaBridge.setAudioFocusOwnership(
+            ttsController.ttsClient.getCapabilities().ownsAudioFocus ?? true,
+          );
         }
         syncClientCapabilities();
       }

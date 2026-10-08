@@ -185,6 +185,29 @@ describe('TTSMediaBridge', () => {
     expect(tauriSession.activations.at(-1)!.ownsAudioFocus).toBe(false);
   });
 
+  test('updates the active service focus owner on an in-session engine switch', async () => {
+    class RecordingTauriSession extends TauriMediaSession {
+      activations: MediaSessionState[] = [];
+      override setActionHandler() {}
+      override async setActive(state: MediaSessionState) {
+        this.activations.push(state);
+      }
+      override async updateMetadata() {}
+      override async updatePlaybackState() {}
+    }
+    const session = new RecordingTauriSession();
+    bridge = new TTSMediaBridge(() => session as unknown as MediaSession);
+    await bridge.bind(controller as unknown as TTSController, meta());
+    await bridge.setAudioFocusOwnership(false);
+    expect(session.activations).toHaveLength(2);
+    expect(session.activations.at(-1)).toMatchObject({ active: true, ownsAudioFocus: false });
+    const count = session.activations.length;
+    await bridge.setAudioFocusOwnership(false);
+    expect(session.activations).toHaveLength(count);
+    await bridge.setAudioFocusOwnership(true);
+    expect(session.activations.at(-1)).toMatchObject({ active: true, ownsAudioFocus: true });
+  });
+
   test('speak-mark events update metadata and clamped position state headless', async () => {
     await bind();
     controller.getPlaybackInfo.mockReturnValue({ position: 90, duration: 60, measuredFraction: 1 });

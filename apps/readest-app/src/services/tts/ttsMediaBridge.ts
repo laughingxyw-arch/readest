@@ -165,18 +165,7 @@ export class TTSMediaBridge {
     if (mediaSession instanceof TauriMediaSession) {
       // Foreground ownership is the startup-critical path. Artwork conversion
       // can be slow and must never delay Android's active media service.
-      await mediaSession.setActive({
-        active: true,
-        sessionId: meta.bookKey,
-        ownsAudioFocus: meta.ownsAudioFocus ?? true,
-        foregroundServiceTitle: meta.title,
-        foregroundServiceText: meta.author,
-        // bookKey is `${hash}-${uniqueId()}`; the hash alone addresses the book
-        // for a readest://book/{hash} resume deep link from the car.
-        bookHash: meta.bookKey.split('-')[0],
-        bookTitle: meta.title,
-        bookAuthor: meta.author,
-      });
+      await this.#activate(mediaSession, meta);
       if (this.#bindingId !== bindingId || this.#mediaSession !== mediaSession) return;
       await mediaSession.updateMetadata({
         title: meta.title,
@@ -228,6 +217,37 @@ export class TTSMediaBridge {
       void this.#updatePlaybackState();
       void this.#updatePositionState();
     }
+  }
+
+  async #activate(mediaSession: TauriMediaSession, meta: TTSMediaBridgeMeta): Promise<void> {
+    await mediaSession.setActive({
+      active: true,
+      sessionId: meta.bookKey,
+      ownsAudioFocus: meta.ownsAudioFocus ?? true,
+      foregroundServiceTitle: meta.title,
+      foregroundServiceText: meta.author,
+      // bookKey is `${hash}-${uniqueId()}`; the hash alone addresses the book
+      // for a readest://book/{hash} resume deep link from the car.
+      bookHash: meta.bookKey.split('-')[0],
+      bookTitle: meta.title,
+      bookAuthor: meta.author,
+    });
+  }
+
+  async setAudioFocusOwnership(ownsAudioFocus: boolean): Promise<void> {
+    const meta = this.#meta;
+    const mediaSession = this.#mediaSession;
+    if (!meta || (meta.ownsAudioFocus ?? true) === ownsAudioFocus) return;
+    const nextMeta = { ...meta, ownsAudioFocus };
+    this.#meta = nextMeta;
+    if (!(mediaSession instanceof TauriMediaSession)) return;
+    const bindingId = this.#bindingId;
+    // The active Android service reconciles focus ownership in place. A
+    // deactivate/reactivate pair can cancel the queued deactivation.
+    await this.#activate(mediaSession, nextMeta);
+    if (this.#bindingId !== bindingId || this.#meta !== nextMeta) return;
+    await this.#updatePlaybackState();
+    await this.#updatePositionState();
   }
 
   unbind(): void {

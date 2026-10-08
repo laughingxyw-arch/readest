@@ -61,7 +61,7 @@
     "copy-flatten-pdfjs-css": "pnpm copy-flatten-pdfjs-annotation-layer-css && pnpm copy-flatten-pdfjs-text-layer-css",
     "copy-pdfjs": "pnpm copy-pdfjs-worker && pnpm copy-pdfjs-wasm && pnpm copy-pdfjs-fonts && pnpm copy-flatten-pdfjs-css",
     "setup-pdfjs": "pnpm prepare-vendor && pnpm copy-pdfjs",
-    "setup-vendors": "pnpm setup-pdfjs",
+    "setup-vendors": "node scripts/apply-foliate-patches.mjs && pnpm setup-pdfjs",
     "build-win-x64": "dotenv -e .env.tauri.local -- tauri build --target i686-pc-windows-msvc --bundles nsis",
     "build-win-arm64": "dotenv -e .env.tauri.local -- tauri build --target aarch64-pc-windows-msvc --bundles nsis",
     "build-linux-x64": "dotenv -e .env.tauri.local -- pnpm tauri build --bundles appimage",

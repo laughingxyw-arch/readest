@@ -3,6 +3,7 @@ import '@/services/constants';
 import { TTSController } from '@/services/tts/TTSController';
 import { getMiMoConfig, setMiMoConfig } from '@/services/tts/mimo';
 import type { FoliateView } from '@/types/view';
+import { Overlayer } from 'foliate-js/overlayer.js';
 import * as CFI from 'foliate-js/epubcfi.js';
 
 // Edge is not used here; avoid its environment/constants import cycle.
@@ -71,4 +72,65 @@ describe('MiMo segment visibility in Chromium', () => {
       frame.remove();
     }
   });
+});
+
+it('keeps paused MiMo line hit targets and annotation priority in a real iframe', async () => {
+  setMiMoConfig({ ...getMiMoConfig(), enabled: true, apiKey: 'test-key' });
+  const frame = document.createElement('iframe');
+  frame.style.cssText = 'width:220px;height:200px;border:0;margin:30px';
+  document.body.append(frame);
+  const doc = frame.contentDocument!;
+  doc.documentElement.innerHTML =
+    '<head><style>body{margin:10px;font:18px sans-serif}p{width:160px;margin:0 0 30px}</style></head><body><p>这是一段正在朗读的文字，跨越几行来检查点击范围。</p><p>下一段文字。</p></body>';
+  const overlayer = new Overlayer(doc);
+  doc.body.append(overlayer.element);
+  const view = {
+    book: { sections: [{ id: '0', createDocument: async () => doc }] },
+    language: { isCJK: true },
+    renderer: { primaryIndex: 0, getContents: () => [{ index: 0, doc, overlayer }] },
+    getCFI: (_index: number, range: Range) => CFI.fromRange(range),
+    resolveCFI: (cfi: string) => ({
+      anchor: (target: Document) => CFI.toRange(target, CFI.parse(cfi)),
+    }),
+  } as unknown as FoliateView;
+  const controller = new TTSController(null, view);
+  try {
+    controller.ttsClient = controller.ttsMiMoClient;
+    await controller.ttsMiMoClient.init();
+    await controller.initViewTTS(0);
+    controller.updateHighlightOptions({ style: 'highlight', color: '#ffff00' });
+    view.tts!.start();
+    controller.dispatchSpeakMark({ name: '0', text: '这是一段', language: 'zh', offset: 0 });
+    const range = doc.createRange();
+    range.selectNodeContents(doc.querySelector('p')!);
+    controller.state = 'playing';
+    controller.dispatchSpeakSegment({
+      startCFI: CFI.fromRange(range),
+      endCFI: CFI.fromRange(range),
+    });
+    const line = range.getClientRects()[0]!;
+    const x = line.left + 5;
+    const y = line.top + 5;
+    expect(controller.isHighlightAt(doc, x, y)).toBe(true);
+    expect(controller.isHighlightAt(doc, 210, y)).toBe(false);
+    expect(controller.isHighlightAt(doc, x, range.getBoundingClientRect().bottom + 10)).toBe(false);
+    await controller.pause();
+    expect(controller.isHighlightAt(doc, x, y)).toBe(true);
+    expect(getComputedStyle(overlayer.element.querySelector('[data-tts-highlight]')!).filter).toBe(
+      'brightness(0.55)',
+    );
+    await controller.resume();
+    expect(getComputedStyle(overlayer.element.querySelector('[data-tts-highlight]')!).filter).toBe(
+      'none',
+    );
+    overlayer.add('epubcfi(annotation)', range, Overlayer.highlight, { color: 'red' });
+    controller.reapplyCurrentHighlight();
+    expect(controller.isHighlightAt(doc, x, y)).toBe(false);
+    expect(overlayer.hitTest({ x, y }, (key: string) => key !== 'tts-highlight')[0]).toBe(
+      'epubcfi(annotation)',
+    );
+  } finally {
+    await controller.shutdown();
+    frame.remove();
+  }
 });

@@ -1276,6 +1276,9 @@ export const useTextSelector = (
       return false;
     };
 
+    const handleSelectionClick = (event: CustomEvent): boolean =>
+      event.detail?.bookKey === bookKey && handleSingleClick();
+    eventDispatcher.onSync('reader-selection-click', handleSelectionClick);
     eventDispatcher.onSync('iframe-single-click', handleSingleClick);
     // After any auto page-turn, re-anchor the Android selection scroll-pin to the
     // page we landed on (the #873 pin in handleScroll). Harmless when nothing is
@@ -1285,6 +1288,7 @@ export const useTextSelector = (
         getView(bookKey)?.renderer?.containerPosition ?? selectionPosition.current;
     });
     return () => {
+      eventDispatcher.offSync('reader-selection-click', handleSelectionClick);
       eventDispatcher.offSync('iframe-single-click', handleSingleClick);
       unsubAfterTurn();
       instantGestureCleanup.current?.();

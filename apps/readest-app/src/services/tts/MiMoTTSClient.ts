@@ -18,6 +18,8 @@ import {
   type MiMoSentence,
 } from './mimo';
 
+const PLAYBACK_STALL_MS = 10000;
+
 const normalize = (text: string) => text.replace(/\s+/g, ' ').trim();
 interface PreparedSection {
   id: string;
@@ -364,6 +366,43 @@ export class MiMoTTSClient implements TTSClient {
     });
     return player;
   }
+  async #play(player: HTMLAudioElement, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted || this.#paused) return;
+    const generation = this.#generation;
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        player.removeEventListener('pause', paused);
+        signal?.removeEventListener('abort', paused);
+      };
+      const paused = () => {
+        cleanup();
+        resolve();
+      };
+      const timeout = setTimeout(() => {
+        if (this.#paused || signal?.aborted || generation !== this.#generation) {
+          paused();
+          return;
+        }
+        cleanup();
+        player.pause();
+        reject(new Error('MiMo audio did not start. Please start reading again.'));
+      }, PLAYBACK_STALL_MS);
+      player.addEventListener('pause', paused, { once: true });
+      signal?.addEventListener('abort', paused, { once: true });
+      player.play().then(
+        () => {
+          cleanup();
+          resolve();
+        },
+        (error) => {
+          cleanup();
+          if (this.#paused || signal?.aborted || generation !== this.#generation) resolve();
+          else reject(error);
+        },
+      );
+    });
+  }
   async #waitUntil(
     player: HTMLAudioElement,
     signal: AbortSignal,
@@ -386,6 +425,20 @@ export class MiMoTTSClient implements TTSClient {
         reject(new Error('MiMo audio playback failed.'));
       };
       const check = () => {
+        if (signal.aborted || generation !== this.#generation || player.ended) {
+          done();
+          return;
+        }
+        const now = Date.now();
+        if (this.#paused || player.currentTime !== lastPosition) {
+          lastPosition = player.currentTime;
+          lastProgressAt = now;
+        } else if (now - lastProgressAt >= PLAYBACK_STALL_MS) {
+          player.pause();
+          cleanup();
+          reject(new Error('MiMo audio is not progressing. Please start reading again.'));
+          return;
+        }
         const batchIndex = this.#batches.indexOf(batch);
         // At most one recording ahead, only near the audible end. Paused or
         // abandoned playback never starts new lookahead requests.
@@ -430,8 +483,9 @@ export class MiMoTTSClient implements TTSClient {
               });
           }
         }
-        if (signal.aborted || generation !== this.#generation || player.ended) done();
       };
+      let lastPosition = player.currentTime;
+      let lastProgressAt = Date.now();
       let lookedAhead = false;
       const timer = setInterval(check, 50);
       player.addEventListener('error', failed, { once: true });
@@ -486,7 +540,7 @@ export class MiMoTTSClient implements TTSClient {
         this.#nextPosition = null;
       }
       player.playbackRate = this.#rate;
-      if (!this.#paused && !player.ended && player.paused) await player.play();
+      if (!this.#paused && !player.ended && player.paused) await this.#play(player, signal);
       const end = batch.first + batch.sentences.length;
       const next = this.#sentences[end];
       yield {
@@ -518,7 +572,8 @@ export class MiMoTTSClient implements TTSClient {
     this.#paused = false;
     for (const wake of this.#resumeWaiters) wake();
     // A navigation offset belongs to the next speak(), not the old recording.
-    if (this.#audio && !this.#audio.ended && this.#nextPosition === null) await this.#audio.play();
+    if (this.#audio && !this.#audio.ended && this.#nextPosition === null)
+      await this.#play(this.#audio);
     return true;
   }
   async stop(handover = false): Promise<void> {
@@ -600,6 +655,7 @@ export class MiMoTTSClient implements TTSClient {
   }
   getCapabilities(): TTSCapabilities {
     return {
+      ownsAudioFocus: false,
       wordBoundaries: false,
       mediaClock: false,
       textHighlight: true,
