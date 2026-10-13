@@ -2525,5 +2525,17 @@
   "MiMo highlights the entire audio segment. Sentence timestamps, word highlighting and lyrics are unavailable.": "MiMo 会高亮当前音频对应的整段文字，暂不提供逐句时间戳、逐字高亮和字幕。",
   "Previewing voice": "试听中",
   "Stop preview": "停止试听",
-  "Could not play voice preview. Please try again.": "无法播放音色示例，请重试。"
+  "Could not play voice preview. Please try again.": "无法播放音色示例，请重试。",
+  "Read aloud failed": "朗读失败",
+  "Error details": "错误详情",
+  "Read aloud failed. See the details below.": "朗读失败，请查看下方错误详情。",
+  "MiMo denied access. Check your API key and account permissions in Settings → TTS.": "MiMo 拒绝访问。请在「设置 → TTS」检查 API key 和账户权限。",
+  "MiMo rejected the request due to a rate or quota limit. Check your account quota or try again later.": "MiMo 请求受到频率或额度限制。请检查账户额度，或稍后重试。",
+  "MiMo service failed. Please try again later.": "MiMo 服务出现错误，请稍后重试。",
+  "MiMo rejected the speech request. See the server details below.": "MiMo 拒绝了语音请求，请查看下方服务端详情。",
+  "The speech request timed out. Check your network and try again.": "语音请求超时，请检查网络后重试。",
+  "Could not reach the speech service. Check your network and try again.": "无法连接语音服务，请检查网络后重试。",
+  "The generated audio could not be played. Please start reading again.": "生成的音频无法正常播放，请重新开始朗读。",
+  "Check your MiMo API key and enable MiMo TTS in Settings → TTS.": "请在「设置 → TTS」检查 MiMo API key，并启用 MiMo TTS。",
+  "The speech request was interrupted. Please try again.": "语音请求意外中断，请重试。"
 }

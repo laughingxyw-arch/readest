@@ -3,7 +3,6 @@ import type { TTSGranularity, TTSMark, TTSVoice, TTSVoicesGroup } from './types'
 import type { TTSController } from './TTSController';
 import { parseSSMLMarks } from '@/utils/ssml';
 import { md5 } from 'js-md5';
-import { eventDispatcher } from '@/utils/event';
 import { TTSUtils } from './TTSUtils';
 import {
   buildMiMoBatches,
@@ -285,19 +284,12 @@ export class MiMoTTSClient implements TTSClient {
       this.#calibrate(batch, audio);
       return audio;
     } catch (error) {
-      if (
-        !preload &&
-        !signal.aborted &&
-        generation === this.#generation &&
-        error instanceof Error &&
-        error.name !== 'AbortError'
-      ) {
-        void eventDispatcher.dispatch('toast', {
-          message: error.message,
-          type: 'error',
-          timeout: 12000,
-        });
-      }
+      // Generation continues for caching after a user stops. Its late failure
+      // must not reopen an error dialog for the cancelled playback task.
+      if (signal.aborted || generation !== this.#generation)
+        throw new DOMException('Aborted', 'AbortError');
+      if ((error instanceof Error || error instanceof DOMException) && error.name === 'AbortError')
+        throw new Error('MiMo speech request was interrupted. Please try again.');
       throw error;
     } finally {
       if (batch.pending === pending) batch.pending = undefined;
@@ -398,6 +390,11 @@ export class MiMoTTSClient implements TTSClient {
         (error) => {
           cleanup();
           if (this.#paused || signal?.aborted || generation !== this.#generation) resolve();
+          else if (
+            (error instanceof Error || error instanceof DOMException) &&
+            error.name === 'AbortError'
+          )
+            reject(new Error('MiMo audio playback was interrupted. Please start reading again.'));
           else reject(error);
         },
       );

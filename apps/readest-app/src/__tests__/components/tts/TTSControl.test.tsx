@@ -1,5 +1,23 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import type { ReactNode } from 'react';
+
+vi.mock('@/components/Dialog', () => ({
+  default: ({
+    isOpen,
+    title,
+    children,
+  }: {
+    isOpen: boolean;
+    title: string;
+    children: ReactNode;
+  }) =>
+    isOpen ? (
+      <div role='dialog' aria-label={title}>
+        {children}
+      </div>
+    ) : null,
+}));
 
 vi.mock('@/hooks/useTranslation', () => ({
   useTranslation: () => (key: string) => key,
@@ -70,6 +88,8 @@ const gridInsets = { top: 0, right: 0, bottom: 0, left: 0 };
 describe('TTSControl', () => {
   beforeEach(() => {
     Object.assign(ttsState, {
+      ttsFailure: null,
+      dismissTtsFailure: vi.fn(),
       isPlaying: true,
       buffering: false,
       ttsLang: 'en',
@@ -116,6 +136,21 @@ describe('TTSControl', () => {
     render(<TTSControl bookKey='b1' gridInsets={gridInsets} />);
     expect(screen.queryByTestId('mini-player')).toBeNull();
     expect(screen.queryByTestId('player-sheet')).toBeNull();
+  });
+
+  test('keeps the failure reason and selectable details visible after the player disappears', () => {
+    const failure = {
+      message: 'MiMo denied access. Check your API key and account permissions in Settings → TTS.',
+      detail: 'MiMo TTS (401): Unauthorized',
+    };
+    Object.assign(ttsState, { showIndicator: false, ttsClientsInited: false, ttsFailure: failure });
+    render(<TTSControl bookKey='b1' gridInsets={gridInsets} />);
+    expect(screen.queryByTestId('mini-player')).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'Read aloud failed' })).toBeTruthy();
+    expect(screen.getByRole('alert').textContent).toContain(failure.message);
+    expect(screen.getByText(failure.detail).className).toContain('select-text');
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(ttsState['dismissTtsFailure']).toHaveBeenCalledOnce();
   });
 
   test('mounts the mini player immediately, before the clients are initialized', () => {

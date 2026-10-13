@@ -20,6 +20,8 @@ import { WebSpeechClient } from './WebSpeechClient';
 import { NativeTTSClient } from './NativeTTSClient';
 import { EdgeTTSClient } from './EdgeTTSClient';
 import { MiMoTTSClient } from './MiMoTTSClient';
+import { getTTSFailure } from './ttsErrors';
+import { eventDispatcher } from '@/utils/event';
 import {
   estimateMiMoSeconds,
   getMiMoConfig,
@@ -2626,10 +2628,17 @@ export class TTSController extends EventTarget {
     // flip state to 'stopped' desyncs the state machine: handleSetRate's
     // `state === 'playing'` check then falls through to a no-op, and #speak's
     // auto-forward gate skips advancing to the next paragraph.
-    if (e instanceof Error && (e.name === 'AbortError' || e.message === 'Aborted')) {
+    if (
+      (e instanceof Error || e instanceof DOMException) &&
+      (e.name === 'AbortError' || e.message === 'Aborted')
+    ) {
       return;
     }
     console.error(e);
+    void eventDispatcher.dispatch('tts-error', {
+      bookKey: this.bookKey,
+      failure: getTTSFailure(e),
+    });
     if (this.ttsClient.getCapabilities().managesLookahead)
       void this.ttsClient.stop().catch(() => {});
     this.#terminate('error');

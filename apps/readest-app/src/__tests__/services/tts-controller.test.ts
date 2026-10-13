@@ -5,6 +5,7 @@ import { TTSGranularity, TTSVoicesGroup } from '@/services/tts/types';
 import { TTSUtils } from '@/services/tts/TTSUtils';
 import { FoliateView } from '@/types/view';
 import { AppService } from '@/types/system';
+import { eventDispatcher } from '@/utils/event';
 
 // --- Mock all heavy dependencies so we never import real TTS clients ---
 
@@ -551,6 +552,24 @@ describe('TTSController', () => {
       controller.state = 'playing';
       controller.error(new Error('test'));
       expect(controller.state).toBe('stopped');
+    });
+
+    test('reports playback errors before terminating the session, but ignores deliberate aborts', async () => {
+      controller.bookKey = 'error-book';
+      const report = vi.fn();
+      eventDispatcher.on('tts-error', report);
+      try {
+        controller.error(new DOMException('Cancelled', 'AbortError'));
+        expect(report).not.toHaveBeenCalled();
+        controller.error(new Error('MiMo audio is not progressing. Please start reading again.'));
+        expect(report).toHaveBeenCalledOnce();
+        expect(report.mock.calls[0]![0].detail).toMatchObject({
+          bookKey: 'error-book',
+          failure: { detail: 'MiMo audio is not progressing. Please start reading again.' },
+        });
+      } finally {
+        eventDispatcher.off('tts-error', report);
+      }
     });
 
     test('error preserves state for AbortError (DOMException-style)', () => {

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // --- Dependency mocks (must be set up before importing the hook) ---
@@ -316,6 +316,47 @@ const Harness = () => {
   useTTSControl({ bookKey: 'book-1' });
   return null;
 };
+
+describe('useTTSControl failure reporting', () => {
+  beforeEach(() => {
+    ttsControllerInstances.length = 0;
+    pendingInitResolvers.length = 0;
+    mockSessionManager.getSessionByHash.mockReturnValue(null);
+    mockSessionManager.getActiveSession.mockReturnValue(null);
+  });
+  afterEach(() => cleanup());
+
+  it('keeps a book-scoped failure after stopping, until the user dismisses it', async () => {
+    const { result } = renderHook(() => useTTSControl({ bookKey: 'book-1' }));
+    const failure = { message: 'Speech failed', detail: 'MiMo TTS (401): Unauthorized' };
+    await act(async () => {
+      await eventDispatcher.dispatch('tts-error', { bookKey: 'other-book', failure });
+    });
+    expect(result.current.ttsFailure).toBeNull();
+    await act(async () => {
+      await eventDispatcher.dispatch('tts-error', { bookKey: 'book-1', failure });
+      await eventDispatcher.dispatch('tts-stop', { bookKey: 'book-1' });
+    });
+    expect(result.current.ttsFailure).toEqual(failure);
+    act(() => result.current.dismissTtsFailure());
+    expect(result.current.ttsFailure).toBeNull();
+  });
+
+  it('preserves initialization failure details instead of claiming the document is unsupported', async () => {
+    const { result } = renderHook(() => useTTSControl({ bookKey: 'book-1' }));
+    await act(async () => {
+      const starting = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1' });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const controller = ttsControllerInstances.at(-1) as { initViewTTS: ReturnType<typeof vi.fn> };
+      controller.initViewTTS.mockRejectedValueOnce(new Error('MiMo API key is missing'));
+      while (pendingInitResolvers.length) pendingInitResolvers.shift()!();
+      await starting;
+    });
+    expect(result.current.ttsFailure?.detail).toBe('MiMo API key is missing');
+    expect(result.current.ttsFailure?.message).toContain('API key');
+    expect(result.current.showIndicator).toBe(false);
+  });
+});
 
 const SectionIndexHarness = () => {
   const { ttsSectionIndex } = useTTSControl({ bookKey: 'book-1' });

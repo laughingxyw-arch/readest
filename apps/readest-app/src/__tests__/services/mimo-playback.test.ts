@@ -46,6 +46,57 @@ afterEach(() => {
 });
 
 describe('MiMo recording playback', () => {
+  it('reports an unexpected request abort as a failure while the user is still waiting', async () => {
+    vi.spyOn(mimoSpeech, 'generate').mockRejectedValue(
+      new DOMException('Transport aborted', 'AbortError'),
+    );
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('unexpected-abort', [{ text: '测试。', lang: 'zh' }]);
+    const first = client
+      .speak('<speak><mark name="a"/>测试。</speak>', new AbortController().signal)
+      [Symbol.asyncIterator]()
+      .next();
+    await expect(first).rejects.toThrow('MiMo speech request was interrupted');
+  });
+
+  it('reports an unexpected audio startup abort without hiding it as a user cancellation', async () => {
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({ blob: new Blob(['test']), duration: 30 });
+    vi.spyOn(MockAudio.prototype, 'play').mockRejectedValue(
+      new DOMException('Unexpected interruption', 'AbortError'),
+    );
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('audio-abort', [{ text: '测试。', lang: 'zh' }]);
+    const first = client
+      .speak('<speak><mark name="a"/>测试。</speak>', new AbortController().signal)
+      [Symbol.asyncIterator]()
+      .next();
+    await expect(first).rejects.toThrow('MiMo audio playback was interrupted');
+  });
+  it('does not report a late generation failure after playback is cancelled', async () => {
+    let rejectGeneration!: (error: Error) => void;
+    vi.spyOn(mimoSpeech, 'generate').mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectGeneration = reject;
+        }),
+    );
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('cancelled', [{ text: '测试。', lang: 'zh' }]);
+    const signal = new AbortController();
+    const first = client
+      .speak('<speak><mark name="a"/>测试。</speak>', signal.signal)
+      [Symbol.asyncIterator]()
+      .next();
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    signal.abort();
+    await client.stop();
+    const rejected = expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    rejectGeneration(new Error('MiMo TTS (401): Unauthorized'));
+    await rejected;
+  });
   it('leaves Android audio focus with the WebView media element', () => {
     expect(new MiMoTTSClient().getCapabilities()).toMatchObject({ ownsAudioFocus: false });
   });

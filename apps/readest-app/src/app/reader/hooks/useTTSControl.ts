@@ -35,6 +35,7 @@ import {
   TTS_STOP_AT_CHAPTER_END,
 } from '@/services/tts/TTSSessionManager';
 import { getAnnotationOverlayColor } from '../utils/annotatorUtil';
+import { getTTSFailure, type TTSFailure } from '@/services/tts/ttsErrors';
 
 interface UseTTSControlProps {
   bookKey: string;
@@ -88,6 +89,15 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   // replayed the current state on demand (see handleTTSSyncRequest).
   const playbackStateRef = useRef<'playing' | 'paused' | 'stopped'>('stopped');
   const [ttsController, setTtsController] = useState<TTSController | null>(null);
+  const [ttsFailure, setTtsFailure] = useState<TTSFailure | null>(null);
+
+  useEffect(() => {
+    const handleError = (event: CustomEvent<{ bookKey?: string; failure: TTSFailure }>) => {
+      if (event.detail.bookKey === bookKey) setTtsFailure(event.detail.failure);
+    };
+    eventDispatcher.on('tts-error', handleError);
+    return () => eventDispatcher.off('tts-error', handleError);
+  }, [bookKey]);
   const [ttsClientsInited, setTtsClientsInitialized] = useState(false);
   // Whether the transport steps by recording time and audiobook chapter
   // (paired audiobook) rather than by sentence and paragraph. State, not a
@@ -921,6 +931,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
     // end up creating two TTSController instances that speak simultaneously.
     if (isStartingTTSRef.current) return;
     isStartingTTSRef.current = true;
+    setTtsFailure(null);
 
     try {
       const view = getView(bookKey);
@@ -1083,12 +1094,14 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
         syncClientCapabilities();
         setTTSEnabled(bookKey, true);
       } catch (error) {
-        setShowIndicator(false);
-        setIsPlaying(false);
-        eventDispatcher.dispatch('toast', {
-          message: _('TTS not supported for this document'),
-          type: 'error',
-        });
+        if (
+          !(
+            (error instanceof Error || error instanceof DOMException) &&
+            error.name === 'AbortError'
+          )
+        )
+          setTtsFailure(getTTSFailure(error));
+        await handleStop(bookKey);
         console.error(error);
       }
     } finally {
@@ -1384,6 +1397,8 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
   }, []);
 
   return {
+    ttsFailure,
+    dismissTtsFailure: () => setTtsFailure(null),
     isPlaying,
     isPaused,
     ttsLang,

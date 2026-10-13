@@ -7,6 +7,7 @@ import { useTTSControl } from '@/app/reader/hooks/useTTSControl';
 import { useTTSDownloads } from '@/app/reader/hooks/useTTSDownloads';
 import { Insets } from '@/types/misc';
 import { eventDispatcher } from '@/utils/event';
+import Dialog from '@/components/Dialog';
 import TTSMiniPlayer from './TTSMiniPlayer';
 import TTSPlayerSheet from './TTSPlayerSheet';
 import { useMiniPlayerAutoHide } from './useMiniPlayerAutoHide';
@@ -75,6 +76,29 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
 
   return (
     <>
+      <Dialog
+        isOpen={!!tts.ttsFailure}
+        title={_('Read aloud failed')}
+        onClose={tts.dismissTtsFailure}
+        boxClassName='sm:max-w-lg'
+      >
+        {tts.ttsFailure && (
+          <div className='flex flex-col gap-4 p-4' role='alert'>
+            <p>{_(tts.ttsFailure.message)}</p>
+            {tts.ttsFailure.detail && (
+              <div className='eink-bordered bg-base-100 rounded-lg border p-3'>
+                <p className='mb-2 text-sm font-semibold'>{_('Error details')}</p>
+                <pre className='select-text whitespace-pre-wrap break-all text-sm'>
+                  {tts.ttsFailure.detail}
+                </pre>
+              </div>
+            )}
+            <button type='button' className='btn btn-contrast' onClick={tts.dismissTtsFailure}>
+              {_('Close')}
+            </button>
+          </div>
+        )}
+      </Dialog>
       {shouldMountBackButton && (
         <div
           className={clsx(
