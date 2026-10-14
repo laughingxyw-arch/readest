@@ -411,6 +411,7 @@ export class MiMoTTSClient implements TTSClient {
         clearInterval(timer);
         player.removeEventListener('error', failed);
         player.removeEventListener('ended', check);
+        player.removeEventListener('seeking', resetProgress);
         signal.removeEventListener('abort', done);
       };
       const done = () => {
@@ -426,16 +427,34 @@ export class MiMoTTSClient implements TTSClient {
           done();
           return;
         }
-        const now = Date.now();
-        if (this.#paused || player.currentTime !== lastPosition) {
-          lastPosition = player.currentTime;
-          lastProgressAt = now;
-        } else if (now - lastProgressAt >= PLAYBACK_STALL_MS) {
-          player.pause();
-          cleanup();
-          reject(new Error('MiMo audio is not progressing. Please start reading again.'));
-          return;
+        const now = performance.now();
+        if (
+          this.#paused ||
+          player.seeking ||
+          player.currentTime < lastPosition ||
+          this.#rate !== progressRate
+        ) {
+          resetProgress();
+        } else if (now - progressStartedAt >= PLAYBACK_STALL_MS) {
+          // Tiny clock changes must not keep a broken output stream alive.
+          // Allow substantial output jitter, but require 20% of the requested
+          // progress over a full window. Pause, seek and rate changes restart it.
+          const expected = ((now - progressStartedAt) / 1000) * progressRate;
+          const progress = player.currentTime - progressPosition;
+          if (progress < expected * 0.2) {
+            player.pause();
+            cleanup();
+            reject(
+              new Error(
+                `MiMo audio is not progressing. Please start reading again. ` +
+                  `(Progress: ${progress.toFixed(2)}s; expected: ${expected.toFixed(2)}s; rate: ${progressRate}x.)`,
+              ),
+            );
+            return;
+          }
+          resetProgress();
         }
+        lastPosition = player.currentTime;
         const batchIndex = this.#batches.indexOf(batch);
         // At most one recording ahead, only near the audible end. Paused or
         // abandoned playback never starts new lookahead requests.
@@ -482,11 +501,19 @@ export class MiMoTTSClient implements TTSClient {
         }
       };
       let lastPosition = player.currentTime;
-      let lastProgressAt = Date.now();
+      let progressPosition = player.currentTime;
+      let progressStartedAt = performance.now();
+      let progressRate = this.#rate;
+      const resetProgress = () => {
+        progressPosition = player.currentTime;
+        progressStartedAt = performance.now();
+        progressRate = this.#rate;
+      };
       let lookedAhead = false;
       const timer = setInterval(check, 50);
       player.addEventListener('error', failed, { once: true });
       player.addEventListener('ended', check);
+      player.addEventListener('seeking', resetProgress);
       signal.addEventListener('abort', done, { once: true });
       check();
     });

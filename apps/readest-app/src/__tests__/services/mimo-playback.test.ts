@@ -123,6 +123,74 @@ describe('MiMo recording playback', () => {
     await client.shutdown();
   });
 
+  it('reports audio that keeps moving much slower than the requested rate', async () => {
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({ blob: new Blob(['test']), duration: 60 });
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('slow-clock', [{ text: '测试。', lang: 'zh' }]);
+    const playback = client
+      .speak('<speak><mark name="a"/>测试。</speak>', new AbortController().signal)
+      [Symbol.asyncIterator]();
+    await playback.next();
+    const outcome = playback.next().then(
+      () => 'finished',
+      (error) => (error as Error).message,
+    );
+    for (let i = 0; i < 11; i++) {
+      MockAudio.instances[0]!.currentTime += 0.02;
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    expect(await Promise.race([outcome, Promise.resolve('still waiting')])).toMatch(
+      /not progressing/,
+    );
+    expect(MockAudio.instances[0]!.paused).toBe(true);
+    await client.shutdown();
+  });
+
+  it('accepts healthy slow-rate playback and resets the window for seeking and rate changes', async () => {
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({ blob: new Blob(['test']), duration: 60 });
+    const client = new MiMoTTSClient();
+    await client.init();
+    await client.setRate(0.5);
+    client.prepareSection('healthy-clock', [{ text: '测试。', lang: 'zh' }]);
+    const signal = new AbortController();
+    const playback = client
+      .speak('<speak><mark name="a"/>测试。</speak>', signal.signal)
+      [Symbol.asyncIterator]();
+    await playback.next();
+    let outcome = 'waiting';
+    const end = playback.next().then(
+      () => {
+        outcome = 'finished';
+      },
+      () => {
+        outcome = 'failed';
+      },
+    );
+    const audio = MockAudio.instances[0]!;
+    for (let i = 0; i < 12; i++) {
+      audio.currentTime += 0.5;
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    expect(outcome).toBe('waiting');
+    await vi.advanceTimersByTimeAsync(8000);
+    audio.currentTime = 30;
+    audio.dispatchEvent(new Event('seeking'));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(outcome).toBe('waiting');
+    await client.setRate(2);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(outcome).toBe('waiting');
+    for (let i = 0; i < 12; i++) {
+      audio.currentTime += 2;
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    expect(outcome).toBe('waiting');
+    signal.abort();
+    await end;
+    await client.shutdown();
+  });
+
   it('bounds a play promise that never resolves without reporting a media error', async () => {
     vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({ blob: new Blob(['test']), duration: 30 });
     vi.spyOn(MockAudio.prototype, 'play').mockImplementation(function (this: MockAudio) {
