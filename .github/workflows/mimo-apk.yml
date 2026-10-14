@@ -43,6 +43,9 @@ jobs:
         with:
           distribution: zulu
           java-version: '17'
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
         with:
           packages: platform-tools
@@ -62,6 +65,14 @@ jobs:
           pnpm install --frozen-lockfile --prefer-offline
           pnpm --filter @readest/readest-app setup-vendors
 
+      - name: Cache frontend compilation
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: apps/readest-app/.next/cache
+          key: mimo-next-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/readest-app/next.config.mjs') }}-${{ github.sha }}
+          restore-keys: |
+            mimo-next-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/readest-app/next.config.mjs') }}-
+
       - name: Check MiMo TTS
         working-directory: apps/readest-app
         run: |
@@ -78,11 +89,14 @@ jobs:
           pnpm tauri icon ../../data/icons/readest-book.png
           # Restore only committed Android customizations, retaining generated scaffolding.
           git restore --source=HEAD --worktree -- src-tauri/gen/android
+          # Keep Gradle task outputs reusable across clean GitHub runners.
+          printf '\norg.gradle.caching=true\n' >> src-tauri/gen/android/gradle.properties
           # Public test-only key: never use this identity for production signing.
           android_dir="$PWD/src-tauri/gen/android"
           cp ../../.github/android-test-signing.p12 "$android_dir/test-signing.p12"
           printf 'keyAlias=androiddebugkey\npassword=android\nstoreFile=%s/test-signing.p12\n' "$android_dir" > "$android_dir/keystore.properties"
-          pnpm tauri android build --target aarch64
+          # This workflow distributes APKs; building an unused AAB repeats Rust compilation.
+          pnpm tauri android build --target aarch64 --apk
           apk_dir=src-tauri/gen/android/app/build/outputs/apk
           apk=$(find "$apk_dir" -type f -name '*-release.apk' -print -quit)
           test -n "$apk"
