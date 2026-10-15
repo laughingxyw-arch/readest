@@ -232,6 +232,10 @@ const STYLE = '请以自然、清晰、正常的中文朗读语速读出文本�
 interface MiMoGenerationOptions {
   preload?: boolean;
   signal?: AbortSignal;
+  // Separate from queue cancellation: pausing may finish an in-flight cache
+  // entry, while abandoning the position must release the HTTP queue promptly.
+  cancelSignal?: AbortSignal;
+  onGenerated?: (elapsedMs: number) => void;
   beforeRequest?: () => Promise<void>;
 }
 export class MiMoAPIError extends Error {
@@ -283,11 +287,21 @@ export class MiMoSpeechService {
           await options.beforeRequest?.();
           if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
           if (!config.apiKey) throw new Error('Set your MiMo API key in Settings → TTS first.');
-          // Once sent, finish and cache the recording even if playback is stopped.
+          // Pausing may finish an in-flight recording; explicit cancellation
+          // releases the queue when its playback position is abandoned.
           // Use an explicit timer: native HTTP must receive an actual abort event.
           const timeout = new AbortController();
-          const timer = setTimeout(() => timeout.abort(), 180000);
+          let timedOut = false;
+          const timer = setTimeout(() => {
+            timedOut = true;
+            timeout.abort();
+          }, 180000);
+          const cancel = () => timeout.abort();
+          options.cancelSignal?.addEventListener('abort', cancel, { once: true });
+          if (options.cancelSignal?.aborted) cancel();
+          const startedAt = performance.now();
           try {
+            if (timeout.signal.aborted) throw new DOMException('Aborted', 'AbortError');
             const response = await this.fetcher(ENDPOINT, {
               method: 'POST',
               headers: {
@@ -333,15 +347,17 @@ export class MiMoSpeechService {
               throw new MiMoAPIError(response.status, message);
             }
             const audio = decodeMiMoAudio(await response.json());
+            options.onGenerated?.(performance.now() - startedAt);
             await this.cache?.put(key, audio).catch(() => {});
             this.#remember(key, audio);
             return audio;
           } catch (error) {
-            if (timeout.signal.aborted)
-              throw new Error('MiMo speech generation timed out. Please try again.');
+            if (timedOut) throw new Error('MiMo speech generation timed out. Please try again.');
+            if (options.cancelSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
             throw error;
           } finally {
             clearTimeout(timer);
+            options.cancelSignal?.removeEventListener('abort', cancel);
           }
         });
       this.#queue = queued;

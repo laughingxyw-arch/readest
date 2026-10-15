@@ -1649,8 +1649,8 @@ export class TTSController extends EventTarget {
     const prepared: { id: string; sentences: MiMoSentence[] }[] = [];
     let estimated = 0;
     const scale = getMiMoDurationScale(config, this.ttsLang || 'en');
-    const target = config.batchMinutes * 60 * 8;
-    // Text lookahead only. Audio lookahead stays at one recording. Avoid
+    const target = Math.max(config.batchMinutes * 60 * 8, 180 * this.ttsRate);
+    // Prepare enough text for the maximum playable buffer, including speedup. Avoid
     // translating unread chapters when translated speech is selected.
     const maxSections = this.ttsTargetLang ? 1 : 128;
     if (this.ttsTargetLang) {

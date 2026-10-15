@@ -8,6 +8,7 @@ import {
   buildMiMoBatches,
   estimateMiMoSeconds,
   MIMO_VOICES,
+  MiMoAPIError,
   mimoSpeech,
   getMiMoConfig,
   getMiMoDurationScale,
@@ -29,7 +30,6 @@ interface PreparedBatch extends MiMoBatch {
   audio?: MiMoAudio;
   pending?: Promise<MiMoAudio>;
   requested?: boolean;
-  lookaheadStarted?: boolean;
 }
 
 // Each recording is one highlighted text segment. Only its real end advances
@@ -59,6 +59,12 @@ export class MiMoTTSClient implements TTSClient {
   #nextPosition: number | null = 0;
   #resumeWaiters = new Set<() => void>();
   #lookaheadAbort: AbortController | null = null;
+  #requestsAbort = new AbortController();
+  #bufferTask: Promise<void> | null = null;
+  #bufferTarget = 90;
+  #latencies: number[] = [];
+  #bufferRetryAt = 0;
+  #bufferFailures = 0;
 
   constructor(private controller?: TTSController) {}
   async init(): Promise<boolean> {
@@ -87,7 +93,7 @@ export class MiMoTTSClient implements TTSClient {
     const identity = `segments-v1|${id}|${config.model}|${config.voice}|${config.batchMinutes}`;
     if (this.#section === identity) return;
     this.#generation++;
-    this.#lookaheadAbort?.abort();
+    this.#cancelBufferRequests();
     for (const wake of this.#resumeWaiters) wake();
     this.#releaseAudio();
     this.#section = identity;
@@ -267,25 +273,37 @@ export class MiMoTTSClient implements TTSClient {
       }
     }
     const generation = this.#generation;
-    const pending = mimoSpeech.generate(
-      batch.sentences.map((s) => s.text).join('\n'),
-      this.#config(),
-      {
-        signal,
-        preload,
-        beforeRequest: preload ? undefined : () => this.#waitForResume(signal, generation),
+    const config = this.#config();
+    const requestSignal = this.#requestsAbort.signal;
+    const pending = mimoSpeech.generate(batch.sentences.map((s) => s.text).join('\n'), config, {
+      signal,
+      preload,
+      cancelSignal: requestSignal,
+      onGenerated: (elapsed) => {
+        // Normal segment handover keeps the request useful, including its
+        // latency sample. Only explicit position/voice cancellation discards it.
+        if (requestSignal.aborted) return;
+        this.#latencies.push(elapsed / 1000);
+        if (this.#latencies.length > 10) this.#latencies.shift();
+        const sorted = [...this.#latencies].sort((a, b) => a - b);
+        const p90 = sorted[Math.ceil(sorted.length * 0.9) - 1]!;
+        const target = Math.min(180, Math.max(60, p90 * 3));
+        this.#bufferTarget =
+          target >= this.#bufferTarget ? target : this.#bufferTarget * 0.8 + target * 0.2;
       },
-    );
+      beforeRequest: preload ? undefined : () => this.#waitForResume(signal, generation),
+    });
     batch.pending = pending;
     try {
       const audio = await pending;
       batch.audio = audio;
       batch.requested = true;
+      this.#bufferRetryAt = 0;
+      this.#bufferFailures = 0;
       this.#calibrate(batch, audio);
       return audio;
     } catch (error) {
-      // Generation continues for caching after a user stops. Its late failure
-      // must not reopen an error dialog for the cancelled playback task.
+      // Late failures from an abandoned position must not reopen its dialog.
       if (signal.aborted || generation !== this.#generation)
         throw new DOMException('Aborted', 'AbortError');
       if ((error instanceof Error || error instanceof DOMException) && error.name === 'AbortError')
@@ -293,6 +311,94 @@ export class MiMoTTSClient implements TTSClient {
       throw error;
     } finally {
       if (batch.pending === pending) batch.pending = undefined;
+    }
+  }
+  #cancelBufferRequests(): void {
+    this.#lookaheadAbort?.abort();
+    this.#requestsAbort.abort();
+    this.#requestsAbort = new AbortController();
+    this.#bufferRetryAt = 0;
+    this.#bufferFailures = 0;
+  }
+  #bufferSeconds(batch: PreparedBatch): number {
+    const index = this.#batches.indexOf(batch);
+    if (index < 0) return 0;
+    let seconds = Math.max(0, (batch.audio?.duration || 0) - (this.#audio?.currentTime || 0));
+    for (let i = index + 1; i < this.#batches.length; i++) {
+      const next = this.#batches[i]!;
+      if (
+        !next.audio ||
+        (this.controller?.stopAtChapterEnd &&
+          next.sentences[0]?.section !== batch.sentences[0]?.section)
+      )
+        break;
+      seconds += next.audio.duration;
+    }
+    return seconds / this.#rate;
+  }
+  #ensureBuffer(batch: PreparedBatch, signal: AbortSignal, generation: number): void {
+    const index = this.#batches.indexOf(batch);
+    if (
+      index < 0 ||
+      signal.aborted ||
+      generation !== this.#generation ||
+      this.#paused ||
+      this.#loadedBatch !== batch ||
+      this.#audio?.paused ||
+      this.#audio?.ended ||
+      this.#bufferTask ||
+      performance.now() < this.#bufferRetryAt ||
+      this.#bufferSeconds(batch) >= this.#bufferTarget * 0.75
+    )
+      return;
+    let nextIndex = index + 1;
+    while (this.#batches[nextIndex]?.audio) nextIndex++;
+    const missing = this.#batches[nextIndex];
+    if (
+      !missing ||
+      (this.controller?.stopAtChapterEnd &&
+        missing.sentences[0]?.section !== batch.sentences[0]?.section)
+    )
+      return;
+    this.#lookaheadAbort = new AbortController();
+    const abort = AbortSignal.any([signal, this.#lookaheadAbort.signal]);
+    const task = this.#fillBuffer(batch, abort, generation)
+      .catch((error) => {
+        if (abort.aborted || generation !== this.#generation) return;
+        this.#bufferFailures++;
+        this.#bufferRetryAt =
+          error instanceof MiMoAPIError && [400, 401, 403].includes(error.status)
+            ? Infinity
+            : performance.now() + Math.min(30000, 1000 * 2 ** Math.min(5, this.#bufferFailures));
+      })
+      .finally(() => {
+        if (this.#bufferTask === task) this.#bufferTask = null;
+      });
+    this.#bufferTask = task;
+  }
+  async #fillBuffer(batch: PreparedBatch, signal: AbortSignal, generation: number): Promise<void> {
+    let cursor = batch;
+    while (
+      !signal.aborted &&
+      generation === this.#generation &&
+      !this.#paused &&
+      !this.#audio?.ended
+    ) {
+      if (this.#bufferSeconds(batch) >= this.#bufferTarget) return;
+      // Bound memory as well as playable seconds (especially at high rates).
+      const bytes = this.#batches.reduce((size, item) => size + (item.audio?.blob.size || 0), 0);
+      if (bytes >= 32 * 1024 * 1024) return;
+      const next = this.#batches[this.#batches.indexOf(cursor) + 1];
+      if (
+        !next ||
+        (this.controller?.stopAtChapterEnd &&
+          next.sentences[0]?.section !== batch.sentences[0]?.section)
+      )
+        return;
+      cursor = await this.#batchAt(next.first, signal);
+      if (signal.aborted || generation !== this.#generation || this.#paused) return;
+      await this.#getAudio(cursor, signal, true);
+      this.#bufferFailures = 0;
     }
   }
   async #waitForResume(signal: AbortSignal, generation: number): Promise<void> {
@@ -354,7 +460,7 @@ export class MiMoTTSClient implements TTSClient {
     this.#loadedBatch = batch;
     const index = this.#batches.indexOf(batch);
     this.#batches.forEach((other, i) => {
-      if (Math.abs(i - index) > 1) other.audio = undefined;
+      if (i < index - 1) other.audio = undefined;
     });
     return player;
   }
@@ -455,50 +561,7 @@ export class MiMoTTSClient implements TTSClient {
           resetProgress();
         }
         lastPosition = player.currentTime;
-        const batchIndex = this.#batches.indexOf(batch);
-        // At most one recording ahead, only near the audible end. Paused or
-        // abandoned playback never starts new lookahead requests.
-        if (
-          batchIndex >= 0 &&
-          !signal.aborted &&
-          generation === this.#generation &&
-          !this.#paused &&
-          !player.paused &&
-          (batch.audio?.duration || player.duration) - player.currentTime <= 20 * this.#rate
-        ) {
-          const next = this.#batches[batchIndex + 1];
-          if (
-            next &&
-            (!this.controller?.stopAtChapterEnd ||
-              next.sentences[0]?.section === batch.sentences[0]?.section) &&
-            !next.audio &&
-            !next.pending &&
-            !next.lookaheadStarted &&
-            !lookedAhead
-          ) {
-            lookedAhead = true;
-            next.lookaheadStarted = true;
-            this.#lookaheadAbort?.abort();
-            this.#lookaheadAbort = new AbortController();
-            const lookaheadSignal = AbortSignal.any([signal, this.#lookaheadAbort.signal]);
-            void this.#batchAt(next.first, lookaheadSignal)
-              .then((prepared) => {
-                prepared.lookaheadStarted = true;
-                if (lookaheadSignal.aborted || generation !== this.#generation)
-                  throw new DOMException('Aborted', 'AbortError');
-                return this.#getAudio(prepared, lookaheadSignal, true);
-              })
-              .catch((error) => {
-                if (
-                  (error instanceof Error || error instanceof DOMException) &&
-                  error.name === 'AbortError'
-                ) {
-                  lookedAhead = false;
-                  next.lookaheadStarted = false;
-                }
-              });
-          }
-        }
+        this.#ensureBuffer(batch, signal, generation);
       };
       let lastPosition = player.currentTime;
       let progressPosition = player.currentTime;
@@ -509,7 +572,6 @@ export class MiMoTTSClient implements TTSClient {
         progressStartedAt = performance.now();
         progressRate = this.#rate;
       };
-      let lookedAhead = false;
       const timer = setInterval(check, 50);
       player.addEventListener('error', failed, { once: true });
       player.addEventListener('ended', check);
@@ -565,6 +627,7 @@ export class MiMoTTSClient implements TTSClient {
       }
       player.playbackRate = this.#rate;
       if (!this.#paused && !player.ended && player.paused) await this.#play(player, signal);
+      if (planned) this.#ensureBuffer(batch, signal, generation);
       const end = batch.first + batch.sentences.length;
       const next = this.#sentences[end];
       yield {
@@ -603,6 +666,7 @@ export class MiMoTTSClient implements TTSClient {
   async stop(handover = false): Promise<void> {
     this.#generation++;
     this.#lookaheadAbort?.abort();
+    if (!handover) this.#cancelBufferRequests();
     for (const wake of this.#resumeWaiters) wake();
     if (!handover) {
       this.#paused = false;
@@ -611,6 +675,10 @@ export class MiMoTTSClient implements TTSClient {
     }
   }
   setNextChunkPosition(seconds: number): void {
+    this.#cancelBufferRequests();
+    this.#batches.forEach((batch) => {
+      if (batch !== this.#loadedBatch) batch.audio = undefined;
+    });
     this.#nextPosition = Math.max(0, seconds);
     this.#audio?.pause();
   }
@@ -639,6 +707,8 @@ export class MiMoTTSClient implements TTSClient {
   async setVoice(voice: string): Promise<void> {
     if (MIMO_VOICES.some((v) => `mimo:${v}` === voice)) {
       this.#voice = voice;
+      this.#latencies = [];
+      this.#bufferTarget = 90;
       if (this.#sectionId) {
         const active = this.#activeSection;
         const cursor = this.#cursor;

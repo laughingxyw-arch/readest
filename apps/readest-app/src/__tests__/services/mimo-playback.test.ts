@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MiMoTTSClient } from '@/services/tts/MiMoTTSClient';
 import type { TTSController } from '@/services/tts/TTSController';
-import { mimoSpeech, getMiMoConfig, setMiMoConfig } from '@/services/tts/mimo';
+import { mimoSpeech, getMiMoConfig, setMiMoConfig, MiMoAPIError } from '@/services/tts/mimo';
 
 class MockAudio extends EventTarget {
   static instances: MockAudio[] = [];
@@ -493,7 +493,10 @@ describe('MiMo recording playback', () => {
     await replay.return?.();
   });
 
-  it('only prepares one next batch near the audible end and does not load it into the player', async () => {
+  it.each([
+    [1, 3],
+    [2, 6],
+  ])('buffers ninety playable seconds at rate %s without loading future players', async (rate, requests) => {
     const generate = vi
       .spyOn(mimoSpeech, 'generate')
       .mockResolvedValue({ blob: new Blob(['test']), duration: 30 });
@@ -503,26 +506,266 @@ describe('MiMo recording playback', () => {
     }));
     const client = new MiMoTTSClient();
     await client.init();
-    client.prepareSection('chapter-lookahead', sentences);
+    await client.setRate(rate);
+    client.prepareSection('buffer-duration', sentences);
+    const playback = client
+      .speak(`<speak><mark name="a"/>${sentences[0]!.text}</speak>`, new AbortController().signal)
+      [Symbol.asyncIterator]();
+    await playback.next();
+    for (let i = 0; i < 100; i++) await Promise.resolve();
+    expect(generate).toHaveBeenCalledTimes(requests);
+    expect(generate.mock.calls.slice(1).every((call) => call[2]?.preload)).toBe(true);
+    expect(MockAudio.instances).toHaveLength(1);
+    await client.shutdown();
+    await playback.return?.();
+  });
+
+  it('does not refill until the playable buffer drops below its low watermark', async () => {
+    const generate = vi
+      .spyOn(mimoSpeech, 'generate')
+      .mockResolvedValue({ blob: new Blob(['test']), duration: 30 });
+    const sentences = Array.from({ length: 80 }, (_, i) => ({
+      text: `${i}：${'山'.repeat(90)}。`,
+      lang: 'zh',
+    }));
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('buffer-refill', sentences);
     const playback = client
       .speak(`<speak><mark name="a"/>${sentences[0]!.text}</speak>`, new AbortController().signal)
       [Symbol.asyncIterator]();
     await playback.next();
     const end = playback.next();
     await vi.advanceTimersByTimeAsync(60);
-    expect(generate).toHaveBeenCalledTimes(1);
-    const player = MockAudio.instances[0]!;
-    player.currentTime = 11;
+    expect(generate).toHaveBeenCalledTimes(3);
+    MockAudio.instances[0]!.currentTime = 10;
     await vi.advanceTimersByTimeAsync(60);
-    expect(generate).toHaveBeenCalledTimes(2);
-    expect(generate.mock.calls[1]![2]).toMatchObject({ preload: true });
-    expect(MockAudio.instances).toHaveLength(1);
-    expect(player.currentTime).toBe(11);
-    player.currentTime = 30;
-    player.ended = true;
+    expect(generate).toHaveBeenCalledTimes(3);
+    MockAudio.instances[0]!.currentTime = 25;
+    await vi.advanceTimersByTimeAsync(60);
+    expect(generate).toHaveBeenCalledTimes(4);
+    await client.shutdown();
     await vi.advanceTimersByTimeAsync(60);
     await end;
+  });
+
+  it('raises the playable target to three minutes after slow generation', async () => {
+    const generate = vi
+      .spyOn(mimoSpeech, 'generate')
+      .mockImplementation(async (_text, _config, options) => {
+        options?.onGenerated?.(60000);
+        return { blob: new Blob(['test']), duration: 30 };
+      });
+    const sentences = Array.from({ length: 80 }, (_, i) => ({
+      text: `${i}：${'山'.repeat(90)}。`,
+      lang: 'zh',
+    }));
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('slow-generation-buffer', sentences);
+    const playback = client
+      .speak(`<speak><mark name="a"/>${sentences[0]!.text}</speak>`, new AbortController().signal)
+      [Symbol.asyncIterator]();
+    await playback.next();
+    for (let i = 0; i < 150; i++) await Promise.resolve();
+    expect(generate).toHaveBeenCalledTimes(6);
     await client.shutdown();
+    await playback.return?.();
+  });
+
+  it('finishes only the in-flight recording after Pause without requesting more', async () => {
+    let finish!: (audio: { blob: Blob; duration: number }) => void;
+    const generate = vi
+      .spyOn(mimoSpeech, 'generate')
+      .mockImplementation(async (_text, _config, options) => {
+        if (options?.preload)
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        return { blob: new Blob(['test']), duration: 30 };
+      });
+    const sentences = Array.from({ length: 80 }, (_, i) => ({
+      text: `${i}：${'山'.repeat(90)}。`,
+      lang: 'zh',
+    }));
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('pause-buffer', sentences);
+    const playback = client
+      .speak(`<speak><mark name="a"/>${sentences[0]!.text}</speak>`, new AbortController().signal)
+      [Symbol.asyncIterator]();
+    await playback.next();
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    expect(generate).toHaveBeenCalledTimes(2);
+    await client.pause();
+    finish({ blob: new Blob(['test']), duration: 30 });
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(MockAudio.instances[0]!.paused).toBe(true);
+    await client.shutdown();
+    await playback.return?.();
+  });
+
+  it('reuses the prepared next segment after normal playback handover', async () => {
+    const generate = vi
+      .spyOn(mimoSpeech, 'generate')
+      .mockResolvedValue({ blob: new Blob(['test']), duration: 30 });
+    const sentences = Array.from({ length: 80 }, (_, i) => ({
+      text: `${i}：${'山'.repeat(90)}。`,
+      lang: 'zh',
+    }));
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('handover-buffer', sentences);
+    const signal = new AbortController().signal;
+    const first = client
+      .speak(`<speak><mark name="a"/>${sentences[0]!.text}</speak>`, signal)
+      [Symbol.asyncIterator]();
+    await first.next();
+    const end = first.next();
+    await vi.advanceTimersByTimeAsync(60);
+    const nextText = generate.mock.calls[1]![0];
+    MockAudio.instances[0]!.ended = true;
+    await vi.advanceTimersByTimeAsync(60);
+    await end;
+    await client.stop(true);
+    const second = client
+      .speak(`<speak><mark name="b"/>${nextText.split('\n')[0]}</speak>`, signal)
+      [Symbol.asyncIterator]();
+    await second.next();
+    expect(generate.mock.calls.filter((call) => call[0] === nextText)).toHaveLength(1);
+    expect(generate.mock.calls.filter((call) => !call[2]?.preload)).toHaveLength(1);
+    expect(MockAudio.instances).toHaveLength(2);
+    await client.shutdown();
+    await second.return?.();
+  });
+
+  it('counts slow in-flight generation carried across a normal playback handover', async () => {
+    let finish!: () => void;
+    let requests = 0;
+    const generate = vi
+      .spyOn(mimoSpeech, 'generate')
+      .mockImplementation(async (_text, _config, options) => {
+        if (++requests === 2)
+          await new Promise<void>((resolve) => {
+            finish = () => {
+              options?.onGenerated?.(60000);
+              resolve();
+            };
+          });
+        return { blob: new Blob(['test']), duration: 30 };
+      });
+    const sentences = Array.from({ length: 80 }, (_, i) => ({
+      text: `${i}：${'山'.repeat(90)}。`,
+      lang: 'zh',
+    }));
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('slow-handover-buffer', sentences);
+    const signal = new AbortController().signal;
+    const first = client
+      .speak(`<speak><mark name="a"/>${sentences[0]!.text}</speak>`, signal)
+      [Symbol.asyncIterator]();
+    await first.next();
+    const end = first.next();
+    await vi.advanceTimersByTimeAsync(60);
+    const nextText = generate.mock.calls[1]![0];
+    MockAudio.instances[0]!.ended = true;
+    await vi.advanceTimersByTimeAsync(60);
+    await end;
+    await client.stop(true);
+    const second = client
+      .speak(`<speak><mark name="b"/>${nextText.split('\n')[0]}</speak>`, signal)
+      [Symbol.asyncIterator]();
+    const boundary = second.next();
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    finish();
+    await boundary;
+    const secondEnd = second.next();
+    await vi.advanceTimersByTimeAsync(60);
+    expect(generate).toHaveBeenCalledTimes(7);
+    await client.shutdown();
+    await vi.advanceTimersByTimeAsync(60);
+    await secondEnd;
+  });
+
+  it('backs off a failed prefetch instead of retrying every playback tick', async () => {
+    const generate = vi
+      .spyOn(mimoSpeech, 'generate')
+      .mockImplementation(async (_text, _config, options) => {
+        if (options?.preload) throw new MiMoAPIError(429, 'rate limit');
+        return { blob: new Blob(['test']), duration: 30 };
+      });
+    const sentences = Array.from({ length: 80 }, (_, i) => ({
+      text: `${i}：${'山'.repeat(90)}。`,
+      lang: 'zh',
+    }));
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('retry-buffer', sentences);
+    const playback = client
+      .speak(`<speak><mark name="a"/>${sentences[0]!.text}</speak>`, new AbortController().signal)
+      [Symbol.asyncIterator]();
+    await playback.next();
+    const end = playback.next();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(generate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(generate).toHaveBeenCalledTimes(3);
+    await client.shutdown();
+    await vi.advanceTimersByTimeAsync(60);
+    await end;
+  });
+
+  it('does not keep probing the cache when the audio memory budget is full', async () => {
+    vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({
+      blob: new Blob([new Uint8Array(32 * 1024 * 1024)]),
+      duration: 30,
+    });
+    const cached = vi.spyOn(mimoSpeech, 'getCached').mockResolvedValue(null);
+    const sentences = Array.from({ length: 80 }, (_, i) => ({
+      text: `${i}：${'山'.repeat(90)}。`,
+      lang: 'zh',
+    }));
+    const client = new MiMoTTSClient();
+    await client.init();
+    client.prepareSection('memory-buffer', sentences);
+    const playback = client
+      .speak(`<speak><mark name="a"/>${sentences[0]!.text}</speak>`, new AbortController().signal)
+      [Symbol.asyncIterator]();
+    await playback.next();
+    const reads = cached.mock.calls.length;
+    const end = playback.next();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(cached).toHaveBeenCalledTimes(reads);
+    await client.shutdown();
+    await vi.advanceTimersByTimeAsync(60);
+    await end;
+  });
+
+  it('does not prefetch across a chapter boundary when chapter-end stopping is enabled', async () => {
+    const generate = vi.spyOn(mimoSpeech, 'generate').mockResolvedValue({
+      blob: new Blob(['test']),
+      duration: 10,
+    });
+    const client = new MiMoTTSClient({
+      stopAtChapterEnd: true,
+      getSpokenSentence: () => null,
+    } as unknown as TTSController);
+    await client.init();
+    client.prepareSection(
+      'first',
+      [{ text: '第一章。', lang: 'zh' }],
+      [{ id: 'second', sentences: [{ text: '第二章。', lang: 'zh' }] }],
+    );
+    const playback = client
+      .speak('<speak><mark name="a"/>第一章。</speak>', new AbortController().signal)
+      [Symbol.asyncIterator]();
+    await playback.next();
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    expect(generate).toHaveBeenCalledTimes(1);
+    await client.shutdown();
+    await playback.return?.();
   });
 
   it('does not request a short fallback when prepared chapter text cannot be matched', async () => {

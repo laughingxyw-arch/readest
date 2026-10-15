@@ -176,6 +176,48 @@ describe('MiMo speech generation', () => {
     await service.generate('第一段', config());
     expect(fetcher).toHaveBeenCalledOnce();
   });
+  it('cancels abandoned prefetch HTTP so a new foreground request is not blocked', async () => {
+    const fetcher = vi
+      .fn()
+      .mockImplementationOnce(
+        (_url, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal!.addEventListener('abort', () =>
+              reject(new DOMException('Aborted', 'AbortError')),
+            );
+          }),
+      )
+      .mockResolvedValue(success());
+    const service = new MiMoSpeechService(fetcher, null);
+    const abort = new AbortController();
+    const old = service.generate('旧预取', config(), { cancelSignal: abort.signal, preload: true });
+    const rejected = expect(old).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+    abort.abort();
+    await expect(service.generate('新位置', config())).resolves.toHaveProperty('duration');
+    await rejected;
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('measures generation time only for real requests, excluding cache hits', async () => {
+    vi.useFakeTimers();
+    const generated = vi.fn();
+    const service = new MiMoSpeechService(
+      vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        return success();
+      }),
+      null,
+    );
+    const first = service.generate('测速', config(), { onGenerated: generated });
+    await vi.advanceTimersByTimeAsync(1100);
+    await first;
+    expect(generated).toHaveBeenCalledWith(expect.any(Number));
+    expect(generated.mock.calls[0]![0]).toBeGreaterThanOrEqual(1000);
+    await service.generate('测速', config(), { onGenerated: generated });
+    expect(generated).toHaveBeenCalledOnce();
+  });
+
   it('uses a bounded native HTTP timeout and unlocks subsequent user retries', async () => {
     vi.useFakeTimers();
     const fetcher = vi.fn().mockImplementation(
